@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <title>fin: three paper-trading arms on one news stream</title>
+  <desc>Public feeds are polled by Rust Lambdas that publish NewsItem events on an EventBridge bus with a 90-day archive. Three arms consume the same stream: v1, a risk-gated serverless pipeline; v2, an Agent SDK investigator with no risk gate; v3, the same investigator plus a gated world model and a curiosity loop. Shared services: a deterministic price resolver over public market-data APIs, Amazon Bedrock models and Nova web grounding, SSM kill switches and budgets, a quote tape, private S3 transcripts. Observers (daily letter, dashboard, A/B report) are read-only. The replay bench re-runs the archive against a simulated book.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <style>
+      .box { fill:#ffffff; stroke:#333; stroke-width:1.2; }
+      .aws { fill:#fff7ec; stroke:#c46a00; }
+      .llm { fill:#eef3ff; stroke:#2b57c9; }
+      .store { fill:#eefaf0; stroke:#2f8f4e; }
+      .ext { fill:#f6f6f6; stroke:#777; stroke-dasharray:4 3; }
+      .obs { fill:#fbf0fa; stroke:#9c3c93; }
+      .t { fill:#111; }
+      .s { fill:#444; font-size:11.5px; }
+      .h { font-weight:600; font-size:14px; fill:#111; }
+      .lane { fill:none; stroke:#bbb; stroke-dasharray:6 4; }
+      .lanet { fill:#555; font-size:12.5px; font-style:italic; }
+      .arrow { stroke:#444; stroke-width:1.3; fill:none; marker-end:url(#arrow); }
+      .title { font-size:17px; font-weight:600; fill:#111; }
+    </style>
+  </defs>
+
+  <text x="30" y="28" class="title">fin — three paper-trading arms on one news stream (paper only: no broker, no real money)</text>
+
+  <!-- Row 1: feeds -> pollers -> bus -> bench -->
+  <rect class="box ext" x="30" y="50" width="300" height="84" rx="6"/>
+  <text x="42" y="70" class="h">Public feeds</text>
+  <text x="42" y="88" class="s">SEC EDGAR 8-K Atom · GlobeNewswire</text>
+  <text x="42" y="104" class="s">CoinDesk · Cointelegraph · investingLive</text>
+  <text x="42" y="120" class="s">USGS · GDACS · NHC · Federal Reserve · ECB</text>
+
+  <path class="arrow" d="M330,92 L368,92"/>
+
+  <rect class="box aws" x="370" y="50" width="240" height="84" rx="6"/>
+  <text x="382" y="70" class="h">Pollers (5 Rust Lambdas)</text>
+  <text x="382" y="88" class="s">EventBridge schedules, 1–5 min</text>
+  <text x="382" y="104" class="s">dedupe (DynamoDB conditional write)</text>
+  <text x="382" y="120" class="s">→ NewsItem; bodies to private S3</text>
+
+  <path class="arrow" d="M610,92 L648,92"/>
+
+  <rect class="box aws" x="650" y="50" width="300" height="84" rx="6"/>
+  <text x="662" y="70" class="h">EventBridge bus &lt;prefix&gt;-events</text>
+  <text x="662" y="88" class="s">detail-type NewsItem</text>
+  <text x="662" y="104" class="s">90-day archive — the bench replays it</text>
+  <text x="662" y="120" class="s">one rule per arm → that arm's SQS queue</text>
+
+  <path class="arrow" d="M950,92 L998,92"/>
+
+  <rect class="box obs" x="1000" y="50" width="250" height="84" rx="6"/>
+  <text x="1012" y="70" class="h">Replay bench (replay.ts)</text>
+  <text x="1012" y="88" class="s">archive → normally-disabled rule → triage once</text>
+  <text x="1012" y="104" class="s">variants × SimBook, quotes as-of the event</text>
+  <text x="1012" y="120" class="s">search off · never touches a live book</text>
+
+  <!-- bus -> lanes -->
+  <path class="arrow" d="M720,134 L720,150 L220,150 L220,193"/>
+  <path class="arrow" d="M800,134 L800,150 L640,150 L640,193"/>
+  <path class="arrow" d="M880,134 L880,150 L1060,150 L1060,193"/>
+
+  <!-- Lanes -->
+  <rect class="lane" x="30" y="165" width="380" height="390" rx="8"/>
+  <text x="44" y="183" class="lanet">v1 — control arm: gated serverless pipeline (Rust)</text>
+  <rect class="lane" x="440" y="165" width="400" height="390" rx="8"/>
+  <text x="454" y="183" class="lanet">v2 — unassisted arm: Agent SDK investigator, NO risk gate</text>
+  <rect class="lane" x="870" y="165" width="380" height="390" rx="8"/>
+  <text x="884" y="183" class="lanet">v3 — world-model arm: v2 code + gated shared memory</text>
+
+  <!-- v1 lane -->
+  <rect class="box llm" x="50" y="195" width="340" height="44" rx="6"/>
+  <text x="62" y="213" class="t">triage-agent — Haiku, materiality ≥ 0.6</text>
+  <text x="62" y="230" class="s">NewsItem → SignalCandidate</text>
+  <path class="arrow" d="M220,239 L220,253"/>
+  <rect class="box llm" x="50" y="255" width="340" height="44" rx="6"/>
+  <text x="62" y="273" class="t">analysis-agent — Sonnet + small tool loop</text>
+  <text x="62" y="290" class="s">get_quote · get_position · get_portfolio · news body → TradeDecision</text>
+  <path class="arrow" d="M220,299 L220,313"/>
+  <rect class="box" x="50" y="315" width="340" height="44" rx="6"/>
+  <text x="62" y="333" class="t">risk-gate — pure Rust, no LLM</text>
+  <text x="62" y="350" class="s">kill switch · notional and exposure caps · daily loss · cooldown</text>
+  <path class="arrow" d="M220,359 L220,373"/>
+  <rect class="box" x="50" y="375" width="340" height="44" rx="6"/>
+  <text x="62" y="393" class="t">exec-engine — live quote + slippage</text>
+  <text x="62" y="410" class="s">refuses quotes &gt; 20 min old → atomic DynamoDB fill</text>
+  <path class="arrow" d="M220,419 L220,443"/>
+  <rect class="box store" x="50" y="445" width="340" height="54" rx="6"/>
+  <text x="62" y="465" class="t">DynamoDB &lt;prefix&gt;-trading</text>
+  <text x="62" y="482" class="s">audit rows per stage · ledger (PORTFOLIO, POSITION#, ORDER#)</text>
+  <text x="50" y="530" class="s">Also the only news producer: every arm reads its pollers.</text>
+
+  <!-- v2 lane -->
+  <rect class="box aws" x="460" y="195" width="360" height="40" rx="6"/>
+  <text x="472" y="213" class="t">SQS &lt;prefix&gt;-v2-news (+ DLQ)</text>
+  <text x="472" y="228" class="s">buffers while the worker is offline (4 days)</text>
+  <path class="arrow" d="M640,235 L640,248"/>
+  <rect class="box" x="460" y="250" width="360" height="58" rx="6"/>
+  <text x="472" y="268" class="t">worker.ts</text>
+  <text x="472" y="284" class="s">age gate · claim · dedupe · 8-K enrichment (Haiku) · triage (Haiku)</text>
+  <text x="472" y="299" class="s">budget breaker (SSM daily cap, 20 % reserve, per-day cap)</text>
+  <path class="arrow" d="M640,308 L640,321"/>
+  <rect class="box llm" x="460" y="323" width="360" height="72" rx="6"/>
+  <text x="472" y="341" class="t">investigate.ts — one bounded Agent SDK query()</text>
+  <text x="472" y="357" class="s">master model on Bedrock · built-in tools off · only the in-process fin MCP:</text>
+  <text x="472" y="372" class="s">read_source · web_search · resolve_instrument · search_markets · portfolio</text>
+  <text x="472" y="387" class="s">submit_decision × N · full transcript to private S3</text>
+  <path class="arrow" d="M640,395 L640,408"/>
+  <rect class="box" x="460" y="410" width="360" height="58" rx="6"/>
+  <text x="472" y="428" class="t">exec.ts — a paper broker's bookkeeping, not a risk gate</text>
+  <text x="472" y="444" class="s">resolver quote ≤ 20 min · buy at ask / sell at bid · ≤ 25 % of visible book</text>
+  <text x="472" y="459" class="s">park (venue closed / limit) · reduce-only working exits · signed positions</text>
+  <path class="arrow" d="M640,468 L640,481"/>
+  <rect class="box store" x="460" y="483" width="360" height="54" rx="6"/>
+  <text x="472" y="503" class="t">DynamoDB &lt;prefix&gt;-v2-trading</text>
+  <text x="472" y="520" class="s">ledger · NEWS# audit · THESIS# · SCOREQ · PENDING# · SPEND · REPORT</text>
+
+  <!-- v3 lane -->
+  <rect class="box aws" x="890" y="195" width="340" height="40" rx="6"/>
+  <text x="902" y="213" class="t">SQS &lt;prefix&gt;-v3-news (+ DLQ)</text>
+  <text x="902" y="228" class="s">the same NewsItems, its own queue</text>
+  <path class="arrow" d="M1060,235 L1060,248"/>
+  <rect class="box" x="890" y="250" width="340" height="58" rx="6"/>
+  <text x="902" y="268" class="t">same worker, V2_WORLD_MODEL=1</text>
+  <text x="902" y="284" class="s">world-aware triage: held positions carry their</text>
+  <text x="902" y="299" class="s">established drivers (exposed_to), not bare symbols</text>
+  <path class="arrow" d="M1060,308 L1060,321"/>
+  <rect class="box llm" x="890" y="323" width="340" height="72" rx="6"/>
+  <text x="902" y="341" class="t">same investigator + world-model tools</text>
+  <text x="902" y="357" class="s">get_world_model · record_fact · link_exposure</text>
+  <text x="902" y="372" class="s">every write through gate.ts: instrument resolves · storm/region</text>
+  <text x="902" y="387" class="s">basin · price fact within 5 % of live · causal link judged (fails closed)</text>
+  <path class="arrow" d="M1060,395 L1060,408"/>
+  <rect class="box" x="890" y="410" width="340" height="58" rx="6"/>
+  <text x="902" y="428" class="t">curiosity.ts — hourly</text>
+  <text x="902" y="444" class="s">contradictions vs live quotes · unexplained positions · stale facts</text>
+  <text x="902" y="459" class="s">idle book → an investigation with trigger "curiosity"</text>
+  <path class="arrow" d="M1060,468 L1060,481"/>
+  <rect class="box store" x="890" y="483" width="340" height="54" rx="6"/>
+  <text x="902" y="503" class="t">DynamoDB &lt;prefix&gt;-v3-trading</text>
+  <text x="902" y="520" class="s">same layout + WM# entities · facts · exposure links</text>
+
+  <!-- Shared services -->
+  <text x="30" y="590" class="lanet">Shared by every arm</text>
+  <rect class="box ext" x="30" y="600" width="300" height="92" rx="6"/>
+  <text x="42" y="620" class="h">Price sources — the resolver is the only oracle</text>
+  <text x="42" y="638" class="s">Yahoo Finance (unofficial) · Kraken · Coinbase</text>
+  <text x="42" y="654" class="s">CriptoYa · Polymarket Gamma · Kalshi</text>
+  <text x="42" y="670" class="s">no live quote → the instrument does not exist for execution</text>
+  <text x="42" y="686" class="s">every observed price is written to the quote tape</text>
+
+  <rect class="box llm" x="350" y="600" width="290" height="92" rx="6"/>
+  <text x="362" y="620" class="h">Amazon Bedrock</text>
+  <text x="362" y="638" class="s">Claude Haiku — triage, 8-K enrichment, link judge</text>
+  <text x="362" y="654" class="s">master model per arm — investigator, daily letter</text>
+  <text x="362" y="670" class="s">Amazon Nova 2 Lite + web grounding — web_search</text>
+  <text x="362" y="686" class="s">(bedrock:InvokeTool on the nova_grounding system tool)</text>
+
+  <rect class="box aws" x="660" y="600" width="280" height="92" rx="6"/>
+  <text x="672" y="620" class="h">Control plane</text>
+  <text x="672" y="638" class="s">SSM per arm: kill switch · daily budget (USD)</text>
+  <text x="672" y="654" class="s">S3 (private): agent transcripts · archived bodies</text>
+  <text x="672" y="670" class="s">SQS DLQs · CloudWatch alarms → SNS email</text>
+  <text x="672" y="686" class="s">an arm = table + queue + budget + kill switch + env</text>
+
+  <rect class="box store" x="960" y="600" width="290" height="92" rx="6"/>
+  <text x="972" y="620" class="h">DynamoDB &lt;prefix&gt;-quote-tape</text>
+  <text x="972" y="638" class="s">QUOTE#&lt;symbol&gt; / TS#  · MARKET#&lt;slug&gt; / TS#</text>
+  <text x="972" y="654" class="s">EVENT#&lt;news_id&gt; / SNAP — item, triage, symbols</text>
+  <text x="972" y="670" class="s">stamped at observation time · TTL 90 days</text>
+  <text x="972" y="686" class="s">read by the bench; never written by it</text>
+
+  <!-- Observers -->
+  <rect class="box obs" x="30" y="716" width="1220" height="84" rx="6"/>
+  <text x="42" y="736" class="h">Observers — read-only, never in the decision path</text>
+  <text x="42" y="754" class="s">daily letter (daily-report.ts + letter.ts + performance.ts; PDF printing is opt-in) · local dashboard on 127.0.0.1 (dashboard.ts) · A/B report across arms (report.ts)</text>
+  <text x="42" y="770" class="s">outcome scorer (score.ts): every action, holds included, scored at 1 h / 1 d / 7 d against realized round-trip prices</text>
+  <text x="42" y="786" class="s">everything marks positions at liquidation value — the bid for longs, the ask for shorts — and the letter, dashboard, scorer and watcher agree</text>
+</svg>

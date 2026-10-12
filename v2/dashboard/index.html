@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fin · paper-trading dashboard</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M8 21l5-6 4 3 7-9' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body data-palette="#2a78d6,#eb6834,#1baf7a">
+<header class="top">
+  <div class="brand">
+    <span class="mark">fin</span>
+    <span class="tag">paper trading · no real money</span>
+  </div>
+  <div class="status" id="status" aria-live="polite"></div>
+  <div class="actions">
+    <span class="updated" id="updated">warming up…</span>
+    <button class="icon" id="refresh" title="Refresh now" aria-label="Refresh now">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M13.6 2.6v3.2h-3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <a class="icon" id="download" href="/snapshot.html?download=1" title="Download a sendable copy of this page" aria-label="Download a sendable copy of this page">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 2.5v8M4.8 7.4 8 10.6l3.2-3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 13.5h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </a>
+    <button class="icon" id="theme" title="Toggle light / dark" aria-label="Toggle light / dark">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.5v11A5.5 5.5 0 0 0 8 2.5z" fill="currentColor"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="main" hidden>
+  <section class="kpis" id="kpis" aria-label="Headline numbers"></section>
+
+  <section class="grid g-3-2">
+    <article class="card" id="equity-card"></article>
+    <article class="card" id="book-card"></article>
+  </section>
+
+  <section class="grid g-1-1-1">
+    <article class="card" id="orders-card"></article>
+    <article class="card" id="ops-card"></article>
+    <article class="card" id="bench-card"></article>
+  </section>
+
+  <section class="filters" id="filters" aria-label="Activity window"></section>
+
+  <section class="grid g-2-1">
+    <article class="card" id="pulse-card"></article>
+    <article class="card" id="coverage-card"></article>
+  </section>
+
+  <section class="grid g-1-1">
+    <article class="card" id="news-card"></article>
+    <article class="card" id="feed-card"></article>
+  </section>
+
+  <section class="grid g-1-1" id="world-row" hidden>
+    <article class="card" id="world-card"></article>
+    <article class="card" id="curiosity-card"></article>
+  </section>
+
+  <section class="grid g-1-1-1">
+    <article class="card" id="scores-card"></article>
+    <article class="card" id="theses-card"></article>
+    <article class="card" id="letters-card"></article>
+  </section>
+
+  <footer class="foot-note" id="footnote"></footer>
+</main>
+
+<div class="empty" id="empty">
+  <div class="pulse-dot" aria-hidden="true"></div>
+  <p>Warming up: marking both books, reading seven days of the audit trail…</p>
+</div>
+
+<div class="tip" id="tip" role="tooltip" aria-hidden="true"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

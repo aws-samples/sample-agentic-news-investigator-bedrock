@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT-0
+[package]
+name = "fin-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+thiserror = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,37 @@
+target/
+node_modules/
+cdk.out/
+*.log
+.DS_Store
+fixtures/live/
+dist/
+~$*.docx
+v2/reports/*.docx
+v2/reports/*.pdf
+
+# Local configuration and secrets: only the documented example is tracked.
+.env
+.env.*
+!.env.example
+v2/.env
+v2/.env.*
+!v2/.env.example
+
+# Agent scratch space and service-manager unit files (operator specific).
+.claude/
+*.plist
+
+# Daily letters are private operator output; keep the directory, not its contents.
+v2/reports/*
+!v2/reports/.gitkeep
+
+# Bench corpora are never tracked: build (bench:build) or dump (bench:dump) your own.
+v2/bench/corpus/
+
+# Local evaluation scratch and Python tooling.
+eval/
+.venv*
+__pycache__/
+
+# ASH (automated-security-helper) scan output
+.ash/ash_output*/

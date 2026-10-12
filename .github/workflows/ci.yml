@@ -1,0 +1,156 @@
+# SPDX-License-Identifier: MIT-0
+name: ci
+
+on:
+  push:
+    branches: [main, oss]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Every action is pinned to a full commit SHA (the tag it was resolved from is
+# the trailing comment), so a moved or compromised tag cannot change what runs.
+# Tool versions installed inside jobs are pinned the same way. Bump deliberately.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: v1 — cargo test + cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-22
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  v2:
+    name: v2 — typecheck, tests, npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: v2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: v2/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm audit --audit-level=high
+
+  infra:
+    name: infra — tests + cdk synth
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: npm ci
+      - run: npm test
+      # Synth only: bundling the twelve Rust Lambdas is a deploy-time cost, not a
+      # CI one. FIN_SKIP_BUNDLING (bin/fin.ts) disables it; the CLI's own
+      # `-c aws:cdk:bundling-stacks=[]` does not, because the CLI's value wins.
+      # The app attaches cdk-nag's AwsSolutionsChecks, so synth fails on any
+      # unsuppressed AwsSolutions error; suppressions and reasons: lib/nag.ts.
+      - run: npx cdk synth -c contactEmail=ci@example.invalid
+        env:
+          FIN_SKIP_BUNDLING: "1"
+
+  secrets:
+    name: detect-secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install detect-secrets==1.5.0
+      # The hook form fails on any finding that is not already in the baseline;
+      # `detect-secrets scan --baseline` alone would silently rewrite it.
+      - run: detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+
+  hygiene:
+    name: scrub, SPDX and .env.example checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: scripts/oss/scrub-check.sh
+      - run: scripts/oss/spdx.sh --check
+      - run: scripts/oss/gen-env-example.sh --check
+      - run: node scripts/render-threat-model.mjs --check
+
+  ash:
+    name: ASH security scan (container mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Checkov reads the synthesized templates (infra/cdk.out/*.template.json,
+      # suppressions in .ash/.ash.yaml), so synthesize before scanning.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-22
+      - run: npm ci && npx cdk synth -c contactEmail=ci@example.invalid
+        working-directory: infra
+        env:
+          FIN_SKIP_BUNDLING: "1"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      # awslabs/automated-security-helper v3.7.1, pinned by commit. Policy,
+      # ignore paths and every suppression (with its reason): .ash/.ash.yaml.
+      - run: pip install "git+https://github.com/awslabs/automated-security-helper.git@af1206aff596f1288ad066828058b3011de2a998"
+      # The image build clones ASH with `git clone --branch <revision>`, which takes a
+      # tag, not a SHA; without this flag it inherits the SHA above and fails at
+      # `uv build`. Tag v3.7.1 is the same commit.
+      - run: ash --mode container --config .ash/.ash.yaml --ash-revision-to-install v3.7.1 --fail-on-findings
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ash-output
+          path: .ash/ash_output/reports/
+
+  ferret:
+    name: Ferret (secrets and PII)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install ferret-scan==1.10.0
+      # Run directly rather than through ASH: as an ASH plugin it crawled
+      # target/ and node_modules for minutes. Fails on any high/medium hit not
+      # in .ferret-scan-suppressions.yaml (reviewed false positives, each with a
+      # reason). Ferret 1.10 quirks: the suppression file is only honoured when
+      # passed explicitly, and --pre-commit-mode exits 2 even when every finding
+      # is suppressed, so the gate is "the JSON result list is empty".
+      - run: |
+          ferret-scan --file . --recursive --respect-gitignore \
+            --exclude ".claude,.ash,node_modules,target,cdk.out,dist,v2/reports,.git" \
+            --checks SECRETS,CREDIT_CARD,SSN,PASSPORT,EMAIL,METADATA \
+            --confidence high,medium \
+            --suppression-file .ferret-scan-suppressions.yaml \
+            --format json --quiet > ferret.json
+          jq -r '(if type == "object" then .results else . end)[] | "\(.filename):\(.line_number) \(.type) (\(.confidence_level))"' ferret.json
+          jq -e '(if type == "object" then .results else . end) | length == 0' ferret.json > /dev/null

@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT-0
+[package]
+name = "fin-ingest"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fin-core = { workspace = true }
+fin-store = { workspace = true }
+aws-sdk-eventbridge = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+feed-rs = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

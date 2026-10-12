@@ -1,0 +1,105 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+# ASH (awslabs/automated-security-helper) configuration for the fin repository.
+#
+# Run:  uvx --from "git+https://github.com/awslabs/automated-security-helper.git@v3" ash --mode container --config .ash/.ash.yaml
+# Reports land in .ash/ash_output/ (gitignored). Container mode adds Grype/Syft
+# for Cargo.lock and the package-lock.json files; local mode covers the rest.
+#
+# Scope: ASH's .gitignore handling does not exclude every untracked tree here,
+# so the paths below name what is never part of the published source.
+project_name: fin
+global_settings:
+  severity_threshold: MEDIUM
+  ignore_paths:
+    - path: '.claude/**'
+      reason: 'Agent scratch space and Claude Code worktree copies of other branches; never published'
+    - path: '**/node_modules/**'
+      reason: 'Installed dependencies; the lockfiles are what is scanned'
+    - path: 'target/**'
+      reason: 'Rust build output'
+    - path: '**/cdk.out/asset.*/**'
+      reason: 'CDK asset staging; the synthesized *.template.json files are still scanned'
+    - path: '**/dist/**'
+      reason: 'Compiled JavaScript (v2/dist and any other dist/); the TypeScript sources are scanned'
+    - path: 'v2/reports/**'
+      reason: 'Daily letters and dashboard exports: private operator output, gitignored, not source'
+    - path: '.ash/**'
+      reason: 'ASH own output and configuration'
+    - path: 'v2/fixtures/live/**'
+      reason: 'Recorded live API fixtures, gitignored'
+    - path: '.npm/**'
+      reason: 'CI package cache (npm_config_cache in .gitlab-ci.yml); downloaded tarballs, not source'
+    - path: '.cargo/**'
+      reason: 'CI Cargo home (CARGO_HOME in .gitlab-ci.yml); the registry index and crate sources, not source'
+    - path: '.pip/**'
+      reason: 'CI pip cache (PIP_CACHE_DIR in .gitlab-ci.yml); cached PyPI responses, not source'
+  # Findings on the synthesized stack (infra/cdk.out/*.template.json) that are
+  # deliberate design choices for a serverless paper-trading sample. Each entry
+  # names the Checkov rule and why the control does not apply here; anything
+  # not listed is fixed in infra/lib/fin-stack.ts instead.
+  suppressions:
+    - rule_id: CKV_AWS_117
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'Lambda in a VPC: the functions call public AWS APIs and public news feeds and the stack has no VPC resources; a VPC would add NAT cost and protect nothing'
+    - rule_id: CKV_AWS_115
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'Reserved concurrency: the stages are event-driven and bursty; a per-function limit would throttle news bursts, and the account concurrency limit is the guardrail'
+    - rule_id: CKV_AWS_173
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'Lambda env vars hold table names, queue URLs and SSM parameter names, no secrets; they are encrypted at rest with the AWS-managed Lambda key'
+    - rule_id: CKV_AWS_119
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'DynamoDB CMK: paper-trading ledgers with no personal or financial data; AWS-owned encryption at rest is sufficient and a CMK adds cost and key policy to a sample'
+    - rule_id: CKV_AWS_27
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'SQS KMS: queues use SQS-managed SSE. EventBridge cannot deliver to a queue encrypted with the AWS-managed aws/sqs key, so KMS here means a CMK and key policy per queue'
+    - rule_id: CKV_AWS_26
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'SNS KMS: the alert topic carries alarm text to an operator email; CloudWatch alarms cannot publish to a topic encrypted with the AWS-managed aws/sns key, so KMS here means a CMK and key policy'
+    - rule_id: CKV_AWS_18
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'S3 access logging: the bucket holds fetched public news bodies for 30 days; a second logging bucket adds cost for no forensic value'
+    - rule_id: CKV_AWS_116
+      path: 'infra/cdk.out/*.template.json'
+      reason: 'Every project function has a dead-letter queue (FunctionDlq). The remaining hits are the CDK-managed custom resource handlers (S3 auto-delete, Lambda log retention), which are not project code'
+  # Grype: brace-expansion 5.0.9 is bundled INSIDE aws-cdk-lib's tarball (every
+  # release through 2.272.0; via minimatch, for asset exclude globs). It runs only
+  # while `cdk synth` stages assets on globs written in this repo, never in a
+  # deployed artifact, and no override on this side can replace a bundled copy:
+  # the fix is an aws-cdk-lib release bundling brace-expansion >= 5.0.12.
+  # (cargo-lambda-cdk, which bundled js-toml and lodash-es, was replaced by
+  # infra/lib/rust-function.ts on 2026-09-30.) Re-check when the expiration passes.
+    - rule_id: 'GHSA-*-brace-expansion'
+      path: 'infra/package-lock.json'
+      reason: 'brace-expansion 5.0.9 bundled inside aws-cdk-lib (synth-time glob expansion on repo-authored patterns only); fixed upstream by an aws-cdk-lib release on brace-expansion >= 5.0.12'
+      expiration: '2026-12-31'
+
+scanners:
+  # Ferret (awslabs/ferret-scan, PII / secrets / IP markers) is an ASH community
+  # plugin, not part of the default set, and is deliberately NOT enabled here:
+  # the container image has no ferret-scan binary (the row would read MISSING),
+  # and although the plugin turns ignore_paths into ferret `--exclude` globs, a
+  # local-mode run on this tree was still walking target/ and node_modules after
+  # six minutes (ferret's --exclude takes simple `dir/` and `*.ext` patterns, not
+  # `**` globs). Run it directly instead, scoped to what is published — the
+  # command is in CLAUDE.md under "whole repo".
+  # cdk-nag in ASH applies NagPacks to bare CloudFormation templates through
+  # CfnInclude. It cannot process templates a CDK app synthesized (the
+  # BootstrapVersion parameter collides, see the ASH FAQ) and it walks the whole
+  # source tree regardless of ignore_paths, so it errors on unrelated YAML. The
+  # CDK app is the right place for cdk-nag; Checkov and cfn-nag still cover the
+  # synthesized template here.
+  cdk-nag:
+    enabled: false
+  # Exact versions for the scanners ASH installs itself in local mode (CI,
+  # scripts/ci/ash-local.sh); without these it resolves its own open ranges.
+  # Each was at least 7 days old when pinned. Bump deliberately.
+  bandit:
+    options:
+      tool_version: '==1.9.4'
+  checkov:
+    options:
+      tool_version: '==3.3.19'
+  semgrep:
+    options:
+      tool_version: '==1.178.0'

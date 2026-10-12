@@ -1,0 +1,44 @@
+# fin daily letter: one run of node dist/daily-report.js. Scheduled by
+# fin-daily-report.timer (08:00 local, Persistent). Run once by hand with
+#   systemctl start fin-daily-report
+# and read the result with
+#   journalctl -u fin-daily-report -n 200
+#
+# Environment: /etc/fin/v2.env supplies the region, profile and the control
+# arm's table; /etc/fin/letter.env (optional) adds letter-only settings such as
+# V3_TABLE, V2_LETTER_EFFORT, V2_PRINT_CMD. REPORT_DAY=YYYY-MM-DD regenerates a
+# past letter without moving the anchor.
+#
+# Output: /opt/fin/v2/reports/YYYY-MM-DD.md (the artifact). The .docx and .pdf
+# copies need pandoc and weasyprint on PATH; when absent the run logs the
+# failure and keeps the markdown. Printing is opt-in (V2_PRINT=1) and, off
+# macOS, only happens through V2_PRINT_CMD (see ops/README.md).
+
+[Unit]
+Description=fin daily letter (markdown, docx, pdf)
+Documentation=file:///opt/fin/ops/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=fin
+Group=fin
+WorkingDirectory=/opt/fin/v2
+EnvironmentFile=/etc/fin/v2.env
+EnvironmentFile=-/etc/fin/letter.env
+Environment=AWS_SDK_LOAD_CONFIG=1
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/fin/v2/dist/daily-report.js
+# The narrative streams from Bedrock with a hard deadline of its own; this is
+# the outer bound for the whole run including the pandoc/weasyprint steps.
+TimeoutStartSec=30min
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fin-daily-report
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/fin/v2/reports

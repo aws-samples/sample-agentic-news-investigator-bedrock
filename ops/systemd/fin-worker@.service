@@ -1,0 +1,60 @@
+# fin paper-trading worker, one instance per arm.
+#
+#   systemctl enable --now fin-worker@v2 fin-worker@v3
+#
+# The instance name (%i) is the arm key. It selects the environment file
+# /etc/fin/<arm>.env (an example block lives in ops/README.md) and the journal
+# identifier fin-<arm>-worker. The code is expected at /opt/fin/v2 with dist/
+# already compiled (`npm ci && npm run compile`); the worker runs the compiled
+# entry point, never tsx.
+#
+# Credentials: any AWS SDK provider chain. On EC2 the instance role needs no
+# configuration at all; otherwise put the profile / credential_process in the
+# service user's ~/.aws/config and set AWS_PROFILE in the env file.
+#
+# Logs: journalctl -u fin-worker@v2 -f
+#
+# After `npm run compile`: systemctl restart fin-worker@v2 fin-worker@v3
+# After editing /etc/fin/<arm>.env: the same restart re-reads the file.
+
+[Unit]
+Description=fin paper-trading worker (%i arm)
+Documentation=file:///opt/fin/ops/README.md
+After=network-online.target
+Wants=network-online.target
+# Five failures in five minutes stops the restart loop; a credential outage
+# should not become a thousand identical stack traces in the journal.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=fin
+Group=fin
+WorkingDirectory=/opt/fin/v2
+EnvironmentFile=/etc/fin/%i.env
+# Lets the SDK read profiles, sso-session and credential_process from ~/.aws/config.
+Environment=AWS_SDK_LOAD_CONFIG=1
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/fin/v2/dist/worker.js
+Restart=on-failure
+RestartSec=30
+# Graceful stop: the worker finishes the message in flight, then exits 0.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fin-%i-worker
+
+# Hardening. The worker writes nothing under /opt/fin; the letter (a separate
+# unit) writes /opt/fin/v2/reports. The credential process may cache under ~/.aws.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

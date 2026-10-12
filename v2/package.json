@@ -1,0 +1,55 @@
+{
+  "name": "fin-v2",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT-0",
+  "type": "module",
+  "description": "fin v2 — local investigation-driven paper-trading agent (Agent SDK + Fable 5.1)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "worker": "tsx src/worker.ts",
+    "report": "tsx src/report.ts",
+    "replay": "tsx src/replay.ts",
+    "bench": "tsx src/replay.ts --corpus",
+    "bench:dump": "tsx src/replay.ts --dump",
+    "bench:build": "tsx src/bench/build-public-corpus.ts",
+    "bench:compare": "tsx src/replay.ts --compare",
+    "daily-report": "tsx src/daily-report.ts",
+    "seed": "tsx src/seed.ts",
+    "dashboard": "node dist/dashboard.js",
+    "dashboard:dev": "tsx src/dashboard.ts",
+    "dashboard:export": "node dist/dashboard-export.js",
+    "leaderboard": "node dist/leaderboard.js",
+    "leaderboard:dev": "tsx src/leaderboard.ts",
+    "yield": "node dist/yield.js",
+    "yield:dev": "tsx src/yield.ts",
+    "build": "tsc --noEmit",
+    "compile": "tsc -p tsconfig.build.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "0.33.3",
+    "@anthropic-ai/claude-agent-sdk": "0.3.258",
+    "@aws-sdk/client-bedrock-runtime": "3.1126.0",
+    "@aws-sdk/client-dynamodb": "3.1121.0",
+    "@aws-sdk/client-eventbridge": "3.1121.0",
+    "@aws-sdk/client-s3": "3.1121.0",
+    "@aws-sdk/client-sqs": "3.1121.0",
+    "@aws-sdk/client-ssm": "3.1121.0",
+    "@aws-sdk/lib-dynamodb": "3.1121.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "hono": "4.13.9"
+  }
+}

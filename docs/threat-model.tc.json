@@ -1,0 +1,1350 @@
+{
+  "schema": 1,
+  "applicationInfo": {
+    "name": "fin — event-driven agentic paper-trading system",
+    "description": "### What we are working on\n`fin` is a research sample (aws-samples, not production-ready) that turns public financial news into **simulated** trades. Three arms share one EventBridge bus:\n\n- **v1 (control):** serverless Rust pipeline — pollers → Haiku triage → Sonnet analysis → deterministic risk gate → paper execution, all Lambda, ledger in DynamoDB `fin-trading`.\n- **v2 (experiment):** a TypeScript Claude Agent SDK investigator (Fable 5.1 on Bedrock) running on a worker host or container, fed by SQS, with an in-process MCP tool server (quotes, primary sources, web grounding, portfolio, `submit_decision`). Deliberately **no risk gate**; a paper broker's bookkeeping is the only hard limit.\n- **v3:** v2's code plus a gated shared world model and an hourly curiosity loop.\n\n**No real money exists anywhere.** Fills are simulated against live quotes; there is no brokerage integration. The security goals are therefore: protect the AWS account and credentials, bound LLM spend, keep the experiment's records trustworthy, and keep the worker host and the experiment's data private.\n\nMethod: AWS four-question threat model, threats in threat grammar, STRIDE classification, Threat Composer data format. Companion artifacts: `.ash/.ash.yaml` (scanner policy, all scanners PASSED 2026-09-19), Ferret scan (no secrets), `docs/THREAT_MODEL.md` (narrative)."
+  },
+  "architecture": {
+    "description": "### Components and trust boundaries\n**B1 Internet → ingestion (Lambda, Rust).** Five pollers on EventBridge schedules fetch public feeds (SEC EDGAR Atom, GlobeNewswire, CoinDesk/Cointelegraph, USGS, NHC/GDACS, Fed, ECB). They write `NewsItem` events to the bus `fin-events`, article bodies to S3 `NewsBodies`, and dedupe rows to DynamoDB. Feed content is **untrusted**.\n\n**B2 Bus → v1 stages (Lambda).** triage-agent → analysis-agent (Bedrock Converse, small tool loop) → risk-gate (pure Rust, reads SSM kill switch) → exec-engine (transactional ledger). Each function has its own IAM role with per-resource grants.\n\n**B3 Bus → SQS → v2/v3 worker (any host or container: launchd, systemd, Docker Compose, ECS or EC2).** `fin-v2-news` / `fin-v3-news` queues with DLQs. The worker claims each item (idempotent), enriches 8-Ks by accession, triages with Haiku, checks the SSM daily budget, then runs one bounded Agent SDK `query()`: built-in tools disabled, only the in-process `fin` MCP server. Decisions are executed by a paper broker into `fin-v2-trading` / `fin-v3-trading`; every price observed is written to `fin-quote-tape`; full transcripts go to S3.\n\n**B4 Agent → external data.** Keyless quote APIs (Yahoo, Kraken, Coinbase, CriptoYa, Polymarket, Kalshi); Amazon Nova web grounding via Bedrock (AWS credentials only); `read_source` fetches SEC filings by accession, archived bodies from S3, or the event's own URL (live mode only).\n\n**B5 Observers (read-only).** Dashboard (loopback :4310), daily letter (Bedrock direct client → PDF → CUPS), A/B report. Alerts: CloudWatch alarms → SNS `fin-alerts` → operator email.\n\n**B6 Replay bench.** EventBridge archive → normally-disabled replay rule → `fin-v2-replay` queue → simulated book with as-of quotes. Never touches live tables; refuses live URLs.\n\n### Credentials\nLambdas: per-function IAM roles. Workers, letter and dashboard: the AWS SDK default provider chain (a profile mounted read-only, environment variables, or an ECS task / EC2 instance role); nothing in the repo, compose file or `.env` holds a credential. The stack exports `WorkerPolicyArn`, a least-privilege managed policy holding exactly what those processes need — the two queues, the trading tables and the tape, the transcript bucket, read-only SSM parameters, the bench's archive and replay, and Bedrock invoke on the named models and Nova grounding — with no IAM actions and no SSM writes. Adopters attach it to the worker identity and nothing broader (`ops/README.md`)."
+  },
+  "dataflow": {
+    "description": "### Data flows and classification\n1. Public feed → poller → `NewsItem` (headline, summary, url, tickers) on the bus; body → S3 (30-day expiry, versioned). Classification: public, untrusted.\n2. `NewsItem` → triage (Haiku) → investigation (Fable) → `submit_decision` → paper fill → DynamoDB rows (`ORDER#`, `POSITION#`, `PORTFOLIO/SNAPSHOT`, `NEWS#<id>` audit stages, `THESIS#`, `SCOREQ`). Classification: experiment record; integrity matters, no real money, no PII.\n3. Investigation → Bedrock (model calls, Nova grounding) → cost folded into the SSM-bounded daily spend. Classification: money (bounded).\n4. Investigation transcript (prompts, tool results incl. third-party content, reasoning) → S3 `NewsBodies` bucket. Classification: low confidentiality; may contain injected content; no secrets.\n5. Quotes → `fin-quote-tape` (90-day TTL, RETAIN). Classification: experiment record.\n6. Operator controls: SSM `/fin/*/kill-switch`, `/fin/*/daily-budget-usd`; scripts; CDK deploy with `contactEmail` (operator PII: one email, used for SEC fair-access header and SNS).\n7. Observers read DynamoDB/S3/SQS attributes/SSM; nothing in the observer path writes.\n\n### Assets\nA1 AWS credentials and roles (highest). A2 Bedrock/LLM spend. A3 Paper ledgers and audit trail (integrity). A4 Transcripts and news bodies (S3). A5 Quote tape. A6 Kill switch and budget parameters. A7 Operator email. A8 Source code and dependencies. A9 Operator host (worker, dashboard, printer)."
+  },
+  "assumptions": [
+    {
+      "id": "bb6fe17b-c501-5d05-989f-5cb12e398cde",
+      "numericId": 1,
+      "displayOrder": 1,
+      "content": "No brokerage is connected anywhere. Fills are simulated against live quotes, so a wrong decision cannot cause financial loss; the harm ceiling for decision-integrity threats is a corrupted experiment record.",
+      "tags": [
+        "AS1"
+      ]
+    },
+    {
+      "id": "c071d206-2f1f-5228-8555-0dc2f183d45b",
+      "numericId": 2,
+      "displayOrder": 2,
+      "content": "Every input the agents read is public and untrusted: news feeds, SEC filings, web grounding results, quote APIs. Content may be adversarial (prompt injection) or wrong.",
+      "tags": [
+        "AS2"
+      ]
+    },
+    {
+      "id": "ea863f74-4e70-5f54-a789-578a124d40cc",
+      "numericId": 3,
+      "displayOrder": 3,
+      "content": "AWS services (Bedrock, EventBridge, SQS, DynamoDB, S3, SSM) and the Nova grounding runtime are trusted under the shared-responsibility model; model outputs are not trusted.",
+      "tags": [
+        "AS3"
+      ]
+    },
+    {
+      "id": "b9257804-c739-589d-9aaa-eb575b2f9385",
+      "numericId": 4,
+      "displayOrder": 4,
+      "content": "Single operator, single AWS account, no end users. No surface listens on a non-loopback interface; the dashboard binds 127.0.0.1.",
+      "tags": [
+        "AS4"
+      ]
+    },
+    {
+      "id": "3db3051d-13f0-5b22-a0bc-592e93f015dd",
+      "numericId": 5,
+      "displayOrder": 5,
+      "content": "The sample is not production-ready. Anyone deploying it does so into their own account, pays their own Bedrock costs, and sets their own budget and kill switch.",
+      "tags": [
+        "AS5"
+      ]
+    },
+    {
+      "id": "af02298a-55e3-5f9e-840d-fec3672a274b",
+      "numericId": 6,
+      "displayOrder": 6,
+      "content": "The worker host or container is controlled by the adopter, and the worker's identity holds only the stack's WorkerPolicy, preferably as a role or short-lived credentials rather than long-lived access keys.",
+      "tags": [
+        "AS6"
+      ]
+    },
+    {
+      "id": "ebf72383-2907-551f-9d37-1e4d0f43840e",
+      "numericId": 7,
+      "displayOrder": 7,
+      "content": "Nova web grounding queries stay inside AWS and results are treated as data. The proprietary Claude Agent SDK and its bundled runtime are trusted as shipped by Anthropic.",
+      "tags": [
+        "AS7"
+      ]
+    },
+    {
+      "id": "c2d1d9b2-c75b-5fad-86ed-eb3fdca752b4",
+      "numericId": 8,
+      "displayOrder": 8,
+      "content": "The replay bench is isolated by construction: separate archive, rule and queue, a simulated book, as-of quotes, and refusal of live URLs. It never writes to live tables or the quote tape.",
+      "tags": [
+        "AS8"
+      ]
+    }
+  ],
+  "mitigations": [
+    {
+      "id": "38f7782b-aa84-52f1-9ef1-14a7776b8a06",
+      "numericId": 1,
+      "displayOrder": 1,
+      "content": "Agent tool confinement. `investigate.ts` runs the Agent SDK with `allowedTools: [\"mcp__fin__*\"]` and every built-in tool disabled (`BUILTIN_TOOLS_OFF`): no shell, file, or general network access — the model's whole world is the in-process `fin` MCP server in `tools.ts` (quotes, primary sources, grounding, portfolio reads, `submit_decision`). Schemas are plain Zod so the server cannot silently expose nothing.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M01"
+      ]
+    },
+    {
+      "id": "4627b223-94f0-5b46-bb14-cc3972639901",
+      "numericId": 2,
+      "displayOrder": 2,
+      "content": "Content-is-data prompt rules. `websearch.ts` SEARCH_SYSTEM tells the grounding model that web content is data, never instructions, to flag embedded instructions rather than follow them, and caps the observation at 300 words. The investigator prompt (`prompts.ts` `contentIsDataSection`, default since 2026-10-01) extends the rule to everything from outside the system: the event's headline and summary (including the enrichment's `Filing summary:` line), every `read_source` document, web_search observations, search_markets titles and descriptions, and past rationales. Text addressed to the model is treated as a fact about its author, named in the rationale, and lowers the source's weight; instructions come only from the system prompt. Benched before it went live (replay bench, 2026-09-17..24, 17 events: the same call as the previous prompt on 15, no false injection flags, equal cost) and probed offline with crafted events carrying an embedded trade instruction (no fill either way; only the new prompt named the injection). The `no-content-rule` bench variant keeps the previous prompt as a control.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M02"
+      ]
+    },
+    {
+      "id": "e35be81e-0cb1-554c-bec0-fdeab0439bf5",
+      "numericId": 3,
+      "displayOrder": 3,
+      "content": "Perception/reasoning split. The master model never reads raw pages: Nova grounding returns a grounded observation with cited URLs; `read_source` caps fetched bytes (MAX_FETCH_BYTES) and keeps only the filing plus EX-99 exhibits; 8-Ks arrive as a Haiku summary (`enrich.ts`).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M03"
+      ]
+    },
+    {
+      "id": "2801348e-ee01-50ae-a028-0252b1fec0c3",
+      "numericId": 4,
+      "displayOrder": 4,
+      "content": "Paper-broker invariants (`exec.ts`, `ledger.ts`, `pending.ts`): cash never negative, total short exposure ≤ equity (no leverage), fills capped to 25% of visible depth, quotes older than `maxQuoteAgeSecs` (20 min) refused, adverse fill at max(half-spread, 2 bps), reducing remainders park as reduce-only working orders. v1 adds a deterministic risk gate (MIN_CONFIDENCE 0.65, 1 h cooldown). There is no real broker to reach.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M04"
+      ]
+    },
+    {
+      "id": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "numericId": 5,
+      "displayOrder": 5,
+      "content": "End-to-end audit trail: one `NEWS#<id>` row per stage (`v2-triage`, `v2-skipped`, `v2-decision` with model and errored flags, `v2-execution`, `v2-order-parked`…), standing theses, outcome scores at 1h/1d/7d, full transcripts in S3, and a daily letter whose Coverage section reports gaps and skips.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M05"
+      ]
+    },
+    {
+      "id": "3a082a24-0d57-5e11-811d-295183f386d7",
+      "numericId": 6,
+      "displayOrder": 6,
+      "content": "Kill switches: SSM `/fin/kill-switch` (v1 risk gate), `/fin/v2/kill-switch`, `/fin/v3/kill-switch`; `scripts/kill-switch*.sh`; the worker checks the parameter every loop and leaves messages in the queue when it is on. The v2/v3 worker fails closed: an unreadable kill switch (missing parameter, denied read, SSM outage) counts as on (`budget.ts` `killSwitchOn`, 2026-10-07); the v1 risk gate's read error fails the invocation, so nothing is approved.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M06"
+      ]
+    },
+    {
+      "id": "be5a171b-a1fe-507f-8733-be17dd646729",
+      "numericId": 7,
+      "displayOrder": 7,
+      "content": "Outbound URL guard (`v2/src/urlguard.ts`, 2026-09-22) on every `read_source` fetch, EDGAR included: https only (an `http:` link is upgraded, never fetched in clear), default port only, no userinfo; the hostname is resolved and refused if any address is loopback, RFC1918, CGNAT, link-local (169.254.0.0/16 — the EC2/ECS metadata endpoints), unique-local (fc00::/7, incl. fd00:ec2::254), NAT64, multicast or reserved, with IPv4-mapped IPv6 judged by the embedded address; redirects are followed by hand (at most 3) and every hop is re-checked. Unit-tested in `test/urlguard.test.ts`. The Rust pollers fetch only operator-configured feed URLs, never a URL taken from content. Residual: DNS rebinding between the check and the connect — adopters running the worker on EC2 or ECS should require IMDSv2 with hop limit 1, and the identity it could reach is bounded by WorkerPolicy (M17).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M07"
+      ]
+    },
+    {
+      "id": "26e66392-0ec6-55f0-b943-30552423aa42",
+      "numericId": 8,
+      "displayOrder": 8,
+      "content": "Spend breaker (`budget.ts`): daily cap from SSM `/fin/<arm>/daily-budget-usd`, the last 20% reserved for position management, `maxInvestigationsPerDay`, per-run `maxBudgetUsd` and `maxTurns`, Nova grounding cost folded into the run's spend. A tripped breaker is audited (`v2-skipped`) and shown on the dashboard. Fails closed: an unreadable or non-numeric daily budget allows no investigation, priority included (2026-10-07; it used to fall back to $25).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M08"
+      ]
+    },
+    {
+      "id": "09890f0d-efad-53d4-b889-1ae9a92b8c5f",
+      "numericId": 9,
+      "displayOrder": 9,
+      "content": "Idempotency and dedupe: `claimNews` (one investigation per news id), exact-headline dedupe window (`recent.ts`), `maxNewsAgeHours` drop, SQS visibility timeout longer than an investigation, DLQ after 3 receives.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M09"
+      ]
+    },
+    {
+      "id": "54dd23fc-628c-53e5-a3cb-0f6b902ee94d",
+      "numericId": 10,
+      "displayOrder": 10,
+      "content": "Triage gate: Haiku materiality scoring before any expensive call (v1 threshold 0.6; v2 `triage.ts` with a lower bar only for held symbols). Cheap model first, expensive model only for what passes.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M10"
+      ]
+    },
+    {
+      "id": "953a35f3-15a2-5598-be35-701104f83054",
+      "numericId": 11,
+      "displayOrder": 11,
+      "content": "Alarms: CloudWatch error alarms on every decision-path function and a Bedrock spend breaker alarm, all to SNS `fin-alerts` → operator email (the `contactEmail` context, required at deploy).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M11"
+      ]
+    },
+    {
+      "id": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "numericId": 12,
+      "displayOrder": 12,
+      "content": "Least-privilege IAM in `infra/lib/fin-stack.ts`: per-function grants (table read/write, bus PutEvents, bucket write or read, SSM read for the kill switch, SNS publish for the digest). Bedrock policy scoped to `anthropic.*` foundation models and `us.anthropic.*` inference profiles. Only pollers and stages hold PutEvents.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M12"
+      ]
+    },
+    {
+      "id": "94757939-fb94-51de-b3bb-cf8df3563217",
+      "numericId": 13,
+      "displayOrder": 13,
+      "content": "Operational rule: never publish synthetic or test events onto the live bus or queues (the rule in `docs/OPERATIONS.md`, set after the 2026-08 smoke-event incident that caused a real paper fill and a book reset). Testing goes through the replay bench only.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M13"
+      ]
+    },
+    {
+      "id": "27a5cc6e-0d93-51d0-a0e8-82ae34882a2a",
+      "numericId": 14,
+      "displayOrder": 14,
+      "content": "Bench isolation (`replay.ts`, `bench/run.ts`, `quotes/asof.ts`): separate archive, replay rule and queue; simulated book; quotes as-of the event; `bench: true` refuses live URLs; no tape writes; results in `BENCHSUM` rows only.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M14"
+      ]
+    },
+    {
+      "id": "c2d0134c-9b60-5751-806e-eb0ff76a632a",
+      "numericId": 15,
+      "displayOrder": 15,
+      "content": "`scripts/v2-smoke.sh` — the one script that published synthetic events onto the live bus, and caused the 2026-08 fill and book reset — was deleted on 2026-09-22; the operator skill and agents that named it now forbid any put-events or send-message onto the live bus or news queues. Testing goes through the replay bench (M14).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M15"
+      ]
+    },
+    {
+      "id": "ed9a009e-bc7a-5987-bb9e-3ff46c7d9fe6",
+      "numericId": 16,
+      "displayOrder": 16,
+      "content": "Credentials from the AWS SDK default provider chain only: none in the repo, the compose file or `.env`; the profile directory is mounted read-only into the containers; an ECS task or EC2 instance role is the recommended identity, and short-lived credentials are preferred everywhere else.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M16"
+      ]
+    },
+    {
+      "id": "78205011-43b0-544e-9391-dfdda4121d9a",
+      "numericId": 17,
+      "displayOrder": 17,
+      "content": "Least-privilege worker identity: the stack's `WorkerPolicy` (output `WorkerPolicyArn`, `infra/lib/fin-stack.ts`) grants the two queues, the trading tables and the tape, the transcript bucket, read-only SSM parameters, the bench archive and replay, and Bedrock invoke on the named models (including the Nova search model) and Nova grounding — no IAM actions, no SSM writes. `ops/README.md` tells adopters to attach it and nothing broader; `infra/test/stack.test.ts` pins its grants.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M17"
+      ]
+    },
+    {
+      "id": "fb86ae68-d751-58b4-b235-c1a796889032",
+      "numericId": 18,
+      "displayOrder": 18,
+      "content": "Bucket hardening on `NewsBodies` (bodies + transcripts): BlockPublicAccess BLOCK_ALL, SSE-S3, 30-day expiry with matching non-current-version expiry, versioning (2026-09-19), auto-delete on stack destroy; only pollers write and analysis reads.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M18"
+      ]
+    },
+    {
+      "id": "2f6964b6-2e21-5ae3-a1db-3c49953cf9c9",
+      "numericId": 19,
+      "displayOrder": 19,
+      "content": "Ledger integrity: atomic DynamoDB transactions over snapshot, position and order (`ledger.ts`); append-only audit rows; point-in-time recovery on all four tables (2026-09-19); any manual reversal is an explicit `v2-book-correction` row written by `admin/unwind-legacy` (dry-run by default), never a silent edit.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M19"
+      ]
+    },
+    {
+      "id": "20a84bb9-df25-56df-a1a5-7f982a6cacfe",
+      "numericId": 20,
+      "displayOrder": 20,
+      "content": "Dependency hygiene: committed lockfiles; ASH policy in `.ash/.ash.yaml` (Grype/Syft, Semgrep, Checkov, detect-secrets) plus `npm audit`/`cargo update` in the release process. 2026-09-19: AWS SDK crates moved off the legacy rustls 0.21 chain, vitest/vite/esbuild and aws-cdk-lib upgraded; 2026-09-30: `cargo-lambda-cdk` (bundled js-toml/lodash-es advisories) replaced by `infra/lib/rust-function.ts`, fast-uri/ip-address updated; brace-expansion bundled inside `aws-cdk-lib` suppressed with a 2026-12-31 expiry pending upstream.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M20"
+      ]
+    },
+    {
+      "id": "987febb1-2b15-5514-b466-ea0c67866619",
+      "numericId": 21,
+      "displayOrder": 21,
+      "content": "CI on the published repository: `.gitlab-ci.yml` (GitLab, where the repository lives; green since 2026-10-01) and `.github/workflows/ci.yml` (the same gates for a GitHub mirror, every Action pinned to a full commit SHA). Every image pinned by digest from ECR Public and every tool install pinned (ASH by commit, Ferret 1.10.0, detect-secrets 1.5.0, cargo-audit 0.22.2; in GitLab's ASH local mode Syft, Grype and Opengrep by checksum, cfn-nag from ASH's Gemfile.lock, Bandit, Checkov and Semgrep at exact versions in `.ash/.ash.yaml`). Jobs: Rust tests and cargo audit, v2 typecheck/tests/npm audit, infra tests and cdk-nag through `cdk synth`, ASH on the synthesized stack (fails on findings and on any scanner that could not run), Ferret (fails on any unsuppressed high/medium hit), detect-secrets, the scrub, SPDX and `.env.example` checks, and the threat-model render check. GitLab's shared runners allow no privileged containers, so ASH runs in local mode there (`scripts/ci/ash-local.sh`) rather than container mode.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M21"
+      ]
+    },
+    {
+      "id": "56f97631-52b3-5a9c-a5eb-5f95a725f145",
+      "numericId": 22,
+      "displayOrder": 22,
+      "content": "Availability controls: DLQs on every queue and, since 2026-09-19, on every Lambda (`FunctionDlq`); 4–14 day retention; SEC fair-access User-Agent (`EDGAR_CONTACT`); quote-source fallbacks (Kraken → Yahoo for wide fiat books); stale-quote refusal; processing gaps reported by the letter and dashboard.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M22"
+      ]
+    },
+    {
+      "id": "957b5edb-b9b6-54c5-aff2-8681e4d76506",
+      "numericId": 23,
+      "displayOrder": 23,
+      "content": "Observer surfaces are loopback-only and read-only: `dashboard.ts` listens on 127.0.0.1:4310; it has no write path to AWS.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M23"
+      ]
+    },
+    {
+      "id": "cfbd3c8e-fcf2-5b78-876f-4b3df3e8e056",
+      "numericId": 24,
+      "displayOrder": 24,
+      "content": "Secrets and PII scanning before publication (2026-09-22, on the exported tree): detect-secrets 1.5.0 against `.secrets.baseline` (hook form, fails on anything new) and Ferret 1.10 (`--checks SECRETS,CREDIT_CARD,SSN,PASSPORT,EMAIL,METADATA`, high/medium) clean; the four Ferret hits that remain are reviewed false positives in `.ferret-scan-suppressions.yaml`, each with a reason and an expiry. `scripts/oss/scrub-check.sh` fails the export on operator-specific text (hostnames, account id, credential tooling, local paths), and the export drops the operator's notes, letters and local tooling entirely. CI repeats all three on every push (M21).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M24"
+      ]
+    },
+    {
+      "id": "0baf4678-15b0-566f-9a80-ad8d8fe75325",
+      "numericId": 25,
+      "displayOrder": 25,
+      "content": "Nothing sensitive is logged or stored in configuration: Lambda environment holds table names, queue URLs and parameter names; the worker logs headlines, decisions and costs; credentials come from roles or the SDK provider chain and are never written.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M25"
+      ]
+    },
+    {
+      "id": "87c6497b-ac25-5d89-951f-01dbb433239d",
+      "numericId": 26,
+      "displayOrder": 26,
+      "content": "Gated world model (v3): `gate.ts` requires instruments to resolve, checks storm↔region basins, rejects price facts more than 5% from the live quote, and asks Haiku to judge causal directness, failing closed on judge errors; every proposal is audited (`v3-world-proposal`); facts carry expiry; the curiosity loop re-investigates contradictions.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M26"
+      ]
+    },
+    {
+      "id": "f7c7d38e-ed9c-5e6d-8785-c6715c8aaa87",
+      "numericId": 27,
+      "displayOrder": 27,
+      "content": "Amazon Bedrock guardrail (`infra/lib/guardrail.ts`, 2026-10-02), a second layer under M02: content filters with PROMPT_ATTACK at HIGH on input, HATE / INSULTS / SEXUAL, VIOLENCE and MISCONDUCT on output, the managed profanity list, and output-only PII anonymisation; distinctive blocked messages so every caller detects a block; an alarm on `InvocationsIntervened` to the alerts topic. v1 (`-c guardrail=on`, the CDK default): triage sends the feed text as Converse guard content, analysis names the guardrail on every tool-loop turn; a block is a not-material triage or a no-trade analysis, audited with `guardrail_intervened`. v2/v3 (`V2_GUARDRAIL_ID` + `V2_GUARDRAIL_VERSION`): triage, filing enrichment and the v3 link judge tag only the untrusted text (per-call random tag suffix, tag text in the content neutralised); the investigator names the guardrail through `ANTHROPIC_CUSTOM_HEADERS` and a block becomes a hold with `guardrail_intervened` on the `v2-decision` row, and any decision the run submitted before the block (or before an error) is withheld as `withheld_decisions`, never executed (`run-decisions.ts`, 2026-10-07); `read_source` and `web_search` results pass ApplyGuardrail before the agent reads them (chunked, bounded, fail-open). On in every arm of the maintainer's deployment since 2026-10-02 (v1 deployed with `-c guardrail=on`, both workers with the two variables; a fully guarded replay bench made 1,286 guardrail calls with 0 interventions and 0 errored investigations).",
+      "status": "mitigationResolved",
+      "tags": [
+        "M27"
+      ]
+    }
+  ],
+  "threats": [
+    {
+      "id": "2a1f5a68-6742-5559-b7e8-559d95c49007",
+      "numericId": 1,
+      "displayOrder": 1,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who can place content in a public feed the pollers ingest (a press release, an 8-K exhibit, a linked article)",
+      "threatAction": "embed instructions aimed at the investigator model inside that content",
+      "threatImpact": "the agent submitting buys, sells, shorts or watchlist entries the evidence does not support",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail",
+        "experiment results"
+      ],
+      "statement": "An internet-based actor who can place content in a public feed the pollers ingest (a press release, an 8-K exhibit, a linked article) can embed instructions aimed at the investigator model inside that content, which leads to the agent submitting buys, sells, shorts or watchlist entries the evidence does not support, resulting in reduced integrity of paper ledgers and audit trail, experiment results.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "Comments",
+          "value": "Residual by design: the experiment measures the model's unassisted judgment, so a persuasive injection can still move a paper position. The blast radius is bounded to the paper book (M04) and every such decision is auditable (M05)."
+        }
+      ],
+      "status": "threatIdentified",
+      "tags": [
+        "T01"
+      ]
+    },
+    {
+      "id": "2295d677-b95b-5346-947b-e4661a502473",
+      "numericId": 2,
+      "displayOrder": 2,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who can rank content in the web index that Nova grounding queries",
+      "threatAction": "embed instructions in a page the grounding model reads",
+      "threatImpact": "a poisoned observation reaching the investigator and biasing its decision",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail"
+      ],
+      "statement": "An internet-based actor who can rank content in the web index that Nova grounding queries can embed instructions in a page the grounding model reads, which leads to a poisoned observation reaching the investigator and biasing its decision, resulting in reduced integrity of paper ledgers and audit trail.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "Nova's runtime filters instruction-bearing content and the SEARCH_SYSTEM prompt repeats the rule; the master model still never sees the raw page."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T02"
+      ]
+    },
+    {
+      "id": "ab90ec6e-bc4b-5068-93db-bd32c807d092",
+      "numericId": 3,
+      "displayOrder": 3,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who controls the link field of an entry in an ingested feed",
+      "threatAction": "point the event URL at a loopback, private or link-local address that read_source then fetches",
+      "threatImpact": "an internal endpoint being read through the worker, including instance metadata credentials when the worker runs on EC2 or ECS",
+      "impactedGoal": [
+        "confidentiality",
+        "integrity"
+      ],
+      "impactedAssets": [
+        "AWS credentials and roles",
+        "internal services on the worker host"
+      ],
+      "statement": "An internet-based actor who controls the link field of an entry in an ingested feed can point the event URL at a loopback, private or link-local address that read_source then fetches, which leads to an internal endpoint being read through the worker, including instance metadata credentials when the worker runs on EC2 or ECS, resulting in reduced confidentiality and integrity of AWS credentials and roles, internal services on the worker host.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "Comments",
+          "value": "Resolved by the outbound URL guard (M07): scheme, port and resolved-address checks on every hop. Residual: DNS rebinding between check and connect, which IMDSv2 with hop limit 1 closes for the metadata service on EC2 or ECS; whatever the identity, WorkerPolicy bounds what it can do (M17)."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T03"
+      ]
+    },
+    {
+      "id": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4",
+      "numericId": 4,
+      "displayOrder": 4,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who can generate many novel headlines in ingested feeds, or an upstream feed malfunction",
+      "threatAction": "trigger investigations at volume",
+      "threatImpact": "Bedrock and Nova spend beyond what the operator intended",
+      "impactedGoal": [
+        "availability"
+      ],
+      "impactedAssets": [
+        "Bedrock/LLM spend"
+      ],
+      "statement": "An internet-based actor who can generate many novel headlines in ingested feeds, or an upstream feed malfunction can trigger investigations at volume, which leads to Bedrock and Nova spend beyond what the operator intended, resulting in reduced availability of Bedrock/LLM spend.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "D"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "Comments",
+          "value": "Ceiling is the SSM daily budget ($100/arm as of 2026-09-06) plus per-run caps; the breaker trips and audits itself, and an independent CloudWatch alarm pages the operator."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T04"
+      ]
+    },
+    {
+      "id": "bdc5d208-7c7f-5d5e-9619-b34885bed48f",
+      "numericId": 5,
+      "displayOrder": 5,
+      "threatSource": "actor with PutEvents on the bus or SendMessage on a news queue",
+      "prerequisites": "such as an operator running the smoke script or a mis-scoped principal",
+      "threatAction": "publish fabricated NewsItem events",
+      "threatImpact": "real paper fills and, as in 2026-08, a reset book driven by data that never happened",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail"
+      ],
+      "statement": "An actor with PutEvents on the bus or SendMessage on a news queue such as an operator running the smoke script or a mis-scoped principal can publish fabricated NewsItem events, which leads to real paper fills and, as in 2026-08, a reset book driven by data that never happened, resulting in reduced integrity of paper ledgers and audit trail.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "S",
+            "T"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "The smoke script is gone (M15); PutEvents is held only by the pollers and stages and SendMessage only by the bus rules (M12); the rule against synthetic events stands (M13) and the bench is the test path (M14). Residual: an operator with admin credentials can still publish by hand."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T05"
+      ]
+    },
+    {
+      "id": "b953c5ed-31fe-55c3-a5f6-aeae84c08f97",
+      "numericId": 6,
+      "displayOrder": 6,
+      "threatSource": "external actor",
+      "prerequisites": "who compromises the worker host or container, or obtains the worker identity's credentials",
+      "threatAction": "use the credentials the v2/v3 worker runs with against the account",
+      "threatImpact": "access to everything those credentials grant: WorkerPolicy's queues, tables, bucket and Bedrock models, or more if the adopter attached broader permissions",
+      "impactedGoal": [
+        "confidentiality",
+        "integrity",
+        "availability"
+      ],
+      "impactedAssets": [
+        "AWS credentials and roles",
+        "trading tables, transcripts and Bedrock spend"
+      ],
+      "statement": "An external actor who compromises the worker host or container, or obtains the worker identity's credentials, can use the credentials the v2/v3 worker runs with against the account, which leads to access to everything those credentials grant: WorkerPolicy's queues, tables, bucket and Bedrock models, or more if the adopter attached broader permissions, resulting in reduced confidentiality and integrity and availability of AWS credentials and roles, trading tables, transcripts and Bedrock spend.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "E",
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "Mitigated by the stack's least-privilege WorkerPolicy (M17) and provider-chain credentials (M16): no IAM actions and no SSM writes, so a stolen worker identity cannot escalate, flip the kill switch or raise the budget. Residual: it can still read and write the paper books and spend Bedrock up to the daily budget; attaching broader permissions than WorkerPolicy is the adopter's risk."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T06"
+      ]
+    },
+    {
+      "id": "ac1f72d5-13bb-5004-889f-41233341ef81",
+      "numericId": 7,
+      "displayOrder": 7,
+      "threatSource": "compromised or misbehaving Lambda function",
+      "prerequisites": "holding a broader IAM grant than its task needs",
+      "threatAction": "act on resources outside its stage",
+      "threatImpact": "lateral movement inside the account",
+      "impactedGoal": [
+        "integrity",
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "AWS credentials and roles"
+      ],
+      "statement": "A compromised or misbehaving Lambda function holding a broader IAM grant than its task needs can act on resources outside its stage, which leads to lateral movement inside the account, resulting in reduced integrity and confidentiality of AWS credentials and roles.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "Reviewed 2026-09-19: grants are per function and per resource. The only wildcards are cloudwatch:PutMetricData (a resource-agnostic API) and Bedrock model ARNs limited to anthropic.* models and inference profiles."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T07"
+      ]
+    },
+    {
+      "id": "47341530-ca4f-5ab2-81e1-b18eec7daef0",
+      "numericId": 8,
+      "displayOrder": 8,
+      "threatSource": "actor with read access to the NewsBodies bucket",
+      "prerequisites": "(the transcript bucket)",
+      "threatAction": "read investigation transcripts and fetched article bodies",
+      "threatImpact": "disclosure of the agent's reasoning and third-party content, and a place where injected content persists for 30 days",
+      "impactedGoal": [
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "transcripts and news bodies"
+      ],
+      "statement": "An actor with read access to the NewsBodies bucket (the transcript bucket) can read investigation transcripts and fetched article bodies, which leads to disclosure of the agent's reasoning and third-party content, and a place where injected content persists for 30 days, resulting in reduced confidentiality of transcripts and news bodies.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "Contents are public news plus model reasoning; no PII and no secrets. Bucket is private, encrypted, versioned and expires objects after 30 days."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T08"
+      ]
+    },
+    {
+      "id": "90b47bdb-cfc2-56bc-85f8-5ec70506a25e",
+      "numericId": 9,
+      "displayOrder": 9,
+      "threatSource": "actor with write access to the trading tables",
+      "prerequisites": "(operator credentials or an over-privileged function)",
+      "threatAction": "alter positions, cash or audit rows",
+      "threatImpact": "a falsified experiment record that the reports and letter would present as real",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail",
+        "quote tape"
+      ],
+      "statement": "An actor with write access to the trading tables (operator credentials or an over-privileged function) can alter positions, cash or audit rows, which leads to a falsified experiment record that the reports and letter would present as real, resulting in reduced integrity of paper ledgers and audit trail, quote tape.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T",
+            "R"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "Atomic writes, append-only audit rows, transcripts as an independent record, PITR for recovery, and explicit correction rows make tampering detectable and recoverable."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T09"
+      ]
+    },
+    {
+      "id": "8de1ed5a-0de3-502c-bb7d-e2bed1f73e4c",
+      "numericId": 10,
+      "displayOrder": 10,
+      "threatSource": "actor with ssm:PutParameter in the account",
+      "prerequisites": "",
+      "threatAction": "flip a kill switch off or raise the daily budget",
+      "threatImpact": "the operator's stop and spend controls being silently defeated",
+      "impactedGoal": [
+        "integrity",
+        "availability"
+      ],
+      "impactedAssets": [
+        "kill switch and budget parameters",
+        "Bedrock/LLM spend"
+      ],
+      "statement": "An actor with ssm:PutParameter in the account can flip a kill switch off or raise the daily budget, which leads to the operator's stop and spend controls being silently defeated, resulting in reduced integrity and availability of kill switch and budget parameters, Bedrock/LLM spend.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "Only operator principals can write the parameters (the risk gate has read-only). The spend alarm does not depend on the parameter, and CloudTrail records every PutParameter."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T10"
+      ]
+    },
+    {
+      "id": "2e40a9fb-4340-5a50-a190-85d7881afc73",
+      "numericId": 11,
+      "displayOrder": 11,
+      "threatSource": "external actor",
+      "prerequisites": "who compromises an upstream npm or crates.io package used by the worker, the dashboard or CDK synth",
+      "threatAction": "execute code in the worker process or at synth time",
+      "threatImpact": "credential theft on the worker host or altered decisions",
+      "impactedGoal": [
+        "integrity",
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "AWS credentials and roles",
+        "source code and dependencies"
+      ],
+      "statement": "An external actor who compromises an upstream npm or crates.io package used by the worker, the dashboard or CDK synth can execute code in the worker process or at synth time, which leads to credential theft on the worker host or altered decisions, resulting in reduced integrity and confidentiality of AWS credentials and roles, source code and dependencies.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "Lockfiles plus ASH (Grype, Syft, npm audit), cargo audit and npm audit gate every push (M21). 2026-09-19 removed nine advisories; 2026-09-30 replaced cargo-lambda-cdk (bundled js-toml/lodash-es) with a local construct and updated fast-uri/ip-address; brace-expansion bundled inside aws-cdk-lib is suppressed until 2026-12-31 (synth-time only, fix is upstream). 2026-10-01, from the first GitLab CI runs: h2 0.4.19, rustls 0.23.45 and rust_decimal 1.43.0 (drops rkyv 0.7), hono 4.13.9 through an npm override, and `min-release-age=7` in both `.npmrc` files so a freshly published version is not resolved. The Agent SDK bundles a Claude Code runtime, a trust placed in Anthropic's package."
+        }
+      ],
+      "status": "threatIdentified",
+      "tags": [
+        "T11"
+      ]
+    },
+    {
+      "id": "46278b9a-be3e-54fb-ab79-3869c083e37e",
+      "numericId": 12,
+      "displayOrder": 12,
+      "threatSource": "external actor or upstream outage",
+      "prerequisites": "such as SEC fair-access throttling, a quote API rate limit or Bedrock throttling",
+      "threatAction": "stall the pipeline or drop events",
+      "threatImpact": "positions going unwatched and news going uninvestigated",
+      "impactedGoal": [
+        "availability"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail"
+      ],
+      "statement": "An external actor or upstream outage such as SEC fair-access throttling, a quote API rate limit or Bedrock throttling can stall the pipeline or drop events, which leads to positions going unwatched and news going uninvestigated, resulting in reduced availability of paper ledgers and audit trail.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "D"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "A paper experiment, so availability loss is a data gap, not a financial one; the letter and dashboard both report gaps explicitly."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T12"
+      ]
+    },
+    {
+      "id": "b079d4b4-cdbd-5541-a382-19ab94644bd2",
+      "numericId": 13,
+      "displayOrder": 13,
+      "threatSource": "operator or reviewer",
+      "prerequisites": "after the fact",
+      "threatAction": "be unable to attribute a fill to the evidence and reasoning that produced it",
+      "threatImpact": "an unexplainable trade in the record",
+      "impactedGoal": [
+        "non-repudiation"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail"
+      ],
+      "statement": "An operator or reviewer after the fact can be unable to attribute a fill to the evidence and reasoning that produced it, which leads to an unexplainable trade in the record, resulting in reduced non-repudiation of paper ledgers and audit trail.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "R"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "Every decision links news id → triage → decision (model, cost, turns) → execution → outcome score, with the full transcript in S3."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T13"
+      ]
+    },
+    {
+      "id": "fb3739b7-e4a9-5fa4-b354-0aede549d307",
+      "numericId": 14,
+      "displayOrder": 14,
+      "threatSource": "actor on the worker host or local network",
+      "prerequisites": "",
+      "threatAction": "reach the dashboard",
+      "threatImpact": "reading the book, logs and letters, or triggering a harmless refresh",
+      "impactedGoal": [
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "worker host"
+      ],
+      "statement": "An actor on the worker host or local network can reach the dashboard, which leads to reading the book, logs and letters, or triggering a harmless refresh, resulting in reduced confidentiality of worker host.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "The dashboard binds loopback and is read-only."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T14"
+      ]
+    },
+    {
+      "id": "626a58db-f55e-5819-9fcb-f3d8b54ab2c9",
+      "numericId": 15,
+      "displayOrder": 15,
+      "threatSource": "contributor",
+      "prerequisites": "preparing the public release",
+      "threatAction": "commit a credential, an internal hostname or operator PII",
+      "threatImpact": "disclosure in the published repository",
+      "impactedGoal": [
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "operator email",
+        "source code and dependencies"
+      ],
+      "statement": "A contributor preparing the public release can commit a credential, an internal hostname or operator PII, which leads to disclosure in the published repository, resulting in reduced confidentiality of operator email, source code and dependencies.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "Resolved for the first release by M24: the export is scrubbed and scanned clean, and CI re-runs detect-secrets, Ferret and the scrub check on every push. Residual: a scanner can miss a secret format it does not know, and git history is not scanned because the published repository starts from a single squashed commit."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T15"
+      ]
+    },
+    {
+      "id": "27f026ce-34e7-5072-ab95-073d18d965c8",
+      "numericId": 16,
+      "displayOrder": 16,
+      "threatSource": "actor with CloudWatch Logs or worker-log access",
+      "prerequisites": "",
+      "threatAction": "read function or worker logs",
+      "threatImpact": "exposure of anything sensitive that was logged",
+      "impactedGoal": [
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "worker host"
+      ],
+      "statement": "An actor with CloudWatch Logs or worker-log access can read function or worker logs, which leads to exposure of anything sensitive that was logged, resulting in reduced confidentiality of worker host.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Low"
+        },
+        {
+          "key": "Comments",
+          "value": "Logs carry headlines, decisions, costs and errors; the environment holds names and URLs only; credentials are never logged."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T16"
+      ]
+    },
+    {
+      "id": "4f168fa1-b725-592e-a098-a132f215ebf4",
+      "numericId": 17,
+      "displayOrder": 17,
+      "threatSource": "compromised or misbehaving model",
+      "prerequisites": "inside the Agent SDK loop",
+      "threatAction": "attempt actions on the host or the network outside the fin tools",
+      "threatImpact": "code execution, file access or exfiltration from the worker",
+      "impactedGoal": [
+        "integrity",
+        "confidentiality"
+      ],
+      "impactedAssets": [
+        "worker host",
+        "AWS credentials and roles"
+      ],
+      "statement": "A compromised or misbehaving model inside the Agent SDK loop can attempt actions on the host or the network outside the fin tools, which leads to code execution, file access or exfiltration from the worker, resulting in reduced integrity and confidentiality of worker host, AWS credentials and roles.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "Comments",
+          "value": "Built-in tools are disabled and only the in-process fin MCP server is allowed; the model can only read prices and documents and submit paper decisions."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T17"
+      ]
+    },
+    {
+      "id": "a3d32b15-9277-5cd0-96fd-628d11e1790e",
+      "numericId": 18,
+      "displayOrder": 18,
+      "threatSource": "internet-based actor",
+      "prerequisites": "via injected or false content the v3 agent reads",
+      "threatAction": "cause false facts or exposure links to be recorded in the shared world model",
+      "threatImpact": "future triage and decisions being biased by poisoned knowledge",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "paper ledgers and audit trail",
+        "experiment results"
+      ],
+      "statement": "An internet-based actor via injected or false content the v3 agent reads can cause false facts or exposure links to be recorded in the shared world model, which leads to future triage and decisions being biased by poisoned knowledge, resulting in reduced integrity of paper ledgers and audit trail, experiment results.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "The gate resolves instruments, checks basins and live prices, and uses a fail-closed judge; every proposal is audited and facts expire. Residual: the judge is itself a model."
+        }
+      ],
+      "status": "threatResolved",
+      "tags": [
+        "T18"
+      ]
+    }
+  ],
+  "mitigationLinks": [
+    {
+      "mitigationId": "38f7782b-aa84-52f1-9ef1-14a7776b8a06",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "4627b223-94f0-5b46-bb14-cc3972639901",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "e35be81e-0cb1-554c-bec0-fdeab0439bf5",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "2801348e-ee01-50ae-a028-0252b1fec0c3",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "3a082a24-0d57-5e11-811d-295183f386d7",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "54dd23fc-628c-53e5-a3cb-0f6b902ee94d",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "4627b223-94f0-5b46-bb14-cc3972639901",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "mitigationId": "e35be81e-0cb1-554c-bec0-fdeab0439bf5",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "mitigationId": "38f7782b-aa84-52f1-9ef1-14a7776b8a06",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "mitigationId": "2801348e-ee01-50ae-a028-0252b1fec0c3",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "mitigationId": "be5a171b-a1fe-507f-8733-be17dd646729",
+      "linkedId": "ab90ec6e-bc4b-5068-93db-bd32c807d092"
+    },
+    {
+      "mitigationId": "38f7782b-aa84-52f1-9ef1-14a7776b8a06",
+      "linkedId": "ab90ec6e-bc4b-5068-93db-bd32c807d092"
+    },
+    {
+      "mitigationId": "78205011-43b0-544e-9391-dfdda4121d9a",
+      "linkedId": "ab90ec6e-bc4b-5068-93db-bd32c807d092"
+    },
+    {
+      "mitigationId": "26e66392-0ec6-55f0-b943-30552423aa42",
+      "linkedId": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4"
+    },
+    {
+      "mitigationId": "09890f0d-efad-53d4-b889-1ae9a92b8c5f",
+      "linkedId": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4"
+    },
+    {
+      "mitigationId": "54dd23fc-628c-53e5-a3cb-0f6b902ee94d",
+      "linkedId": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4"
+    },
+    {
+      "mitigationId": "953a35f3-15a2-5598-be35-701104f83054",
+      "linkedId": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4"
+    },
+    {
+      "mitigationId": "3a082a24-0d57-5e11-811d-295183f386d7",
+      "linkedId": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4"
+    },
+    {
+      "mitigationId": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "mitigationId": "94757939-fb94-51de-b3bb-cf8df3563217",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "mitigationId": "27a5cc6e-0d93-51d0-a0e8-82ae34882a2a",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "mitigationId": "c2d0134c-9b60-5751-806e-eb0ff76a632a",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "mitigationId": "ed9a009e-bc7a-5987-bb9e-3ff46c7d9fe6",
+      "linkedId": "b953c5ed-31fe-55c3-a5f6-aeae84c08f97"
+    },
+    {
+      "mitigationId": "78205011-43b0-544e-9391-dfdda4121d9a",
+      "linkedId": "b953c5ed-31fe-55c3-a5f6-aeae84c08f97"
+    },
+    {
+      "mitigationId": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "linkedId": "b953c5ed-31fe-55c3-a5f6-aeae84c08f97"
+    },
+    {
+      "mitigationId": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "linkedId": "ac1f72d5-13bb-5004-889f-41233341ef81"
+    },
+    {
+      "mitigationId": "fb86ae68-d751-58b4-b235-c1a796889032",
+      "linkedId": "47341530-ca4f-5ab2-81e1-b18eec7daef0"
+    },
+    {
+      "mitigationId": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "linkedId": "47341530-ca4f-5ab2-81e1-b18eec7daef0"
+    },
+    {
+      "mitigationId": "0baf4678-15b0-566f-9a80-ad8d8fe75325",
+      "linkedId": "47341530-ca4f-5ab2-81e1-b18eec7daef0"
+    },
+    {
+      "mitigationId": "2f6964b6-2e21-5ae3-a1db-3c49953cf9c9",
+      "linkedId": "90b47bdb-cfc2-56bc-85f8-5ec70506a25e"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "90b47bdb-cfc2-56bc-85f8-5ec70506a25e"
+    },
+    {
+      "mitigationId": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "linkedId": "90b47bdb-cfc2-56bc-85f8-5ec70506a25e"
+    },
+    {
+      "mitigationId": "ec1d47f9-4107-54fa-bfdc-0c5fcc94decc",
+      "linkedId": "8de1ed5a-0de3-502c-bb7d-e2bed1f73e4c"
+    },
+    {
+      "mitigationId": "953a35f3-15a2-5598-be35-701104f83054",
+      "linkedId": "8de1ed5a-0de3-502c-bb7d-e2bed1f73e4c"
+    },
+    {
+      "mitigationId": "20a84bb9-df25-56df-a1a5-7f982a6cacfe",
+      "linkedId": "2e40a9fb-4340-5a50-a190-85d7881afc73"
+    },
+    {
+      "mitigationId": "987febb1-2b15-5514-b466-ea0c67866619",
+      "linkedId": "2e40a9fb-4340-5a50-a190-85d7881afc73"
+    },
+    {
+      "mitigationId": "38f7782b-aa84-52f1-9ef1-14a7776b8a06",
+      "linkedId": "2e40a9fb-4340-5a50-a190-85d7881afc73"
+    },
+    {
+      "mitigationId": "56f97631-52b3-5a9c-a5eb-5f95a725f145",
+      "linkedId": "46278b9a-be3e-54fb-ab79-3869c083e37e"
+    },
+    {
+      "mitigationId": "09890f0d-efad-53d4-b889-1ae9a92b8c5f",
+      "linkedId": "46278b9a-be3e-54fb-ab79-3869c083e37e"
+    },
+    {
+      "mitigationId": "953a35f3-15a2-5598-be35-701104f83054",
+      "linkedId": "46278b9a-be3e-54fb-ab79-3869c083e37e"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "b079d4b4-cdbd-5541-a382-19ab94644bd2"
+    },
+    {
+      "mitigationId": "957b5edb-b9b6-54c5-aff2-8681e4d76506",
+      "linkedId": "fb3739b7-e4a9-5fa4-b354-0aede549d307"
+    },
+    {
+      "mitigationId": "cfbd3c8e-fcf2-5b78-876f-4b3df3e8e056",
+      "linkedId": "626a58db-f55e-5819-9fcb-f3d8b54ab2c9"
+    },
+    {
+      "mitigationId": "987febb1-2b15-5514-b466-ea0c67866619",
+      "linkedId": "626a58db-f55e-5819-9fcb-f3d8b54ab2c9"
+    },
+    {
+      "mitigationId": "0baf4678-15b0-566f-9a80-ad8d8fe75325",
+      "linkedId": "27f026ce-34e7-5072-ab95-073d18d965c8"
+    },
+    {
+      "mitigationId": "38f7782b-aa84-52f1-9ef1-14a7776b8a06",
+      "linkedId": "4f168fa1-b725-592e-a098-a132f215ebf4"
+    },
+    {
+      "mitigationId": "2801348e-ee01-50ae-a028-0252b1fec0c3",
+      "linkedId": "4f168fa1-b725-592e-a098-a132f215ebf4"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "4f168fa1-b725-592e-a098-a132f215ebf4"
+    },
+    {
+      "mitigationId": "87c6497b-ac25-5d89-951f-01dbb433239d",
+      "linkedId": "a3d32b15-9277-5cd0-96fd-628d11e1790e"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "a3d32b15-9277-5cd0-96fd-628d11e1790e"
+    },
+    {
+      "mitigationId": "f7c7d38e-ed9c-5e6d-8785-c6715c8aaa87",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "mitigationId": "f7c7d38e-ed9c-5e6d-8785-c6715c8aaa87",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "mitigationId": "f7c7d38e-ed9c-5e6d-8785-c6715c8aaa87",
+      "linkedId": "a3d32b15-9277-5cd0-96fd-628d11e1790e"
+    }
+  ],
+  "assumptionLinks": [
+    {
+      "type": "Threat",
+      "assumptionId": "bb6fe17b-c501-5d05-989f-5cb12e398cde",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "c071d206-2f1f-5228-8555-0dc2f183d45b",
+      "linkedId": "2a1f5a68-6742-5559-b7e8-559d95c49007"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "c071d206-2f1f-5228-8555-0dc2f183d45b",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "ebf72383-2907-551f-9d37-1e4d0f43840e",
+      "linkedId": "2295d677-b95b-5346-947b-e4661a502473"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "c071d206-2f1f-5228-8555-0dc2f183d45b",
+      "linkedId": "ab90ec6e-bc4b-5068-93db-bd32c807d092"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "af02298a-55e3-5f9e-840d-fec3672a274b",
+      "linkedId": "ab90ec6e-bc4b-5068-93db-bd32c807d092"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "3db3051d-13f0-5b22-a0bc-592e93f015dd",
+      "linkedId": "235ee3fe-4ca9-5d61-8069-a6da018e5fb4"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "bb6fe17b-c501-5d05-989f-5cb12e398cde",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "c2d1d9b2-c75b-5fad-86ed-eb3fdca752b4",
+      "linkedId": "bdc5d208-7c7f-5d5e-9619-b34885bed48f"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "af02298a-55e3-5f9e-840d-fec3672a274b",
+      "linkedId": "b953c5ed-31fe-55c3-a5f6-aeae84c08f97"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "b9257804-c739-589d-9aaa-eb575b2f9385",
+      "linkedId": "47341530-ca4f-5ab2-81e1-b18eec7daef0"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "bb6fe17b-c501-5d05-989f-5cb12e398cde",
+      "linkedId": "90b47bdb-cfc2-56bc-85f8-5ec70506a25e"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "b9257804-c739-589d-9aaa-eb575b2f9385",
+      "linkedId": "8de1ed5a-0de3-502c-bb7d-e2bed1f73e4c"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "ebf72383-2907-551f-9d37-1e4d0f43840e",
+      "linkedId": "2e40a9fb-4340-5a50-a190-85d7881afc73"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "3db3051d-13f0-5b22-a0bc-592e93f015dd",
+      "linkedId": "46278b9a-be3e-54fb-ab79-3869c083e37e"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "b9257804-c739-589d-9aaa-eb575b2f9385",
+      "linkedId": "fb3739b7-e4a9-5fa4-b354-0aede549d307"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "ebf72383-2907-551f-9d37-1e4d0f43840e",
+      "linkedId": "4f168fa1-b725-592e-a098-a132f215ebf4"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "c071d206-2f1f-5228-8555-0dc2f183d45b",
+      "linkedId": "a3d32b15-9277-5cd0-96fd-628d11e1790e"
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: MIT-0
+# Ferret suppressions: each rule is a reviewed false positive, keyed by content hash
+# (an edit to the line re-opens it). Review again before the expiry.
+version: '1.0'
+rules:
+- id: SUP-00000001
+  hash: 75f9604fc4df82168ced9f91153a33539be3aab83ecc63ce55d881fde351f86e # pragma: allowlist secret
+  reason: The published AWS vulnerability-reporting address that SECURITY.md is required
+    to carry; not personal data.
+  enabled: true
+  created_at: "2026-09-22T19:33:23.871995+01:00"
+  last_seen_at: "2026-09-22T19:33:23.871995+01:00"
+  expires_at: "2026-12-31T19:33:23.871995+01:00"
+  metadata:
+    confidence: '100'
+    context_hash: 2ade2ed7067a495a # pragma: allowlist secret
+    filename: SECURITY.md
+    finding_type: BUSINESS
+    line_number: '5'
+    match_text_hash: 454eddc6ae1bd399 # pragma: allowlist secret
+- id: SUP-00000002
+  hash: d9249d828242f2a8549ada7abb978047345ffa6ec09436e2b74a3bfd84b6d4c5 # pragma: allowlist secret
+  reason: Same line as SUP-00000001 (the AWS vulnerability-reporting address), matched
+    twice.
+  enabled: true
+  created_at: "2026-09-22T19:33:23.871995+01:00"
+  last_seen_at: "2026-09-22T19:33:23.871995+01:00"
+  expires_at: "2026-12-31T19:33:23.871995+01:00"
+  metadata:
+    confidence: '100'
+    context_hash: 43aba49cb6183cd4 # pragma: allowlist secret
+    filename: SECURITY.md
+    finding_type: BUSINESS
+    line_number: '5'
+    match_text_hash: 454eddc6ae1bd399 # pragma: allowlist secret
+- id: SUP-00000010
+  hash: 9e260c57f02a5737c103290b3df9ebbb852c5a11aec8a77cdfa9262b00dc4d6f # pragma: allowlist secret
+  reason: A fixed fake content hash in a unit-test fixture (bench comparison), not
+    a credential.
+  enabled: true
+  created_at: "2026-09-22T19:33:23.871995+01:00"
+  last_seen_at: "2026-09-22T19:33:23.871995+01:00"
+  expires_at: "2026-12-31T19:33:23.871995+01:00"
+  metadata:
+    confidence: '60'
+    context_hash: ''
+    filename: bench-compare.test.ts
+    finding_type: API_KEY_OR_SECRET
+    line_number: '27'
+    match_text_hash: 0e592d8e39bc1418 # pragma: allowlist secret
+- id: SUP-00000011
+  hash: 91ab82482aa992f7be63cd12750bb82f6be497942ae129712a3a8d72e836f878 # pragma: allowlist secret
+  reason: A systemd template-unit name in a dashboard test, not an
+    email address.
+  enabled: true
+  created_at: "2026-09-22T19:33:23.871995+01:00"
+  last_seen_at: "2026-09-22T19:33:23.871995+01:00"
+  expires_at: "2026-12-31T19:33:23.871995+01:00"
+  metadata:
+    confidence: '100'
+    context_hash: 51aab847d1ab6fc5 # pragma: allowlist secret
+    filename: dashboard.test.ts
+    finding_type: EMAIL
+    line_number: '250'
+    match_text_hash: 9f53fc308d11822b # pragma: allowlist secret
+- id: SUP-00000012
+  hash: 33f77c3a0d6c801528a4b6924dc0b27c506c69f93f994b6df1319bec474aeafb # pragma: allowlist secret
+  reason: The published Amazon open-source code-of-conduct address that the standard
+    CODE_OF_CONDUCT.md carries; not personal data.
+  enabled: true
+  created_at: "2026-10-01T14:59:04.188086-07:00"
+  last_seen_at: "2026-10-01T14:59:04.188086-07:00"
+  expires_at: "2026-12-31T19:33:23.871995+01:00"
+  metadata:
+    confidence: '100'
+    context_hash: aafa2ba4738f200a # pragma: allowlist secret
+    filename: CODE_OF_CONDUCT.md
+    finding_type: BUSINESS
+    line_number: '4'
+    match_text_hash: e12eee6b049d7d18 # pragma: allowlist secret
+- id: SUP-00000013
+  hash: 313f84e98de23ab90033de02da99108ff0ab5de3d1343ed340cc9a6aac84e9a7 # pragma: allowlist secret
+  reason: Same code-of-conduct address as SUP-00000012, repeated in the standard
+    CONTRIBUTING.md.
+  enabled: true
+  created_at: "2026-10-01T14:59:04.31521-07:00"
+  last_seen_at: "2026-10-01T14:59:04.31521-07:00"
+  expires_at: "2026-12-31T19:33:23.871995+01:00"
+  metadata:
+    confidence: '100'
+    context_hash: aafa2ba4738f200a # pragma: allowlist secret
+    filename: CONTRIBUTING.md
+    finding_type: BUSINESS
+    line_number: '64'
+    match_text_hash: e12eee6b049d7d18 # pragma: allowlist secret

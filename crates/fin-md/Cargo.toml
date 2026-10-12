@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MIT-0
+[package]
+name = "fin-md"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fin-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

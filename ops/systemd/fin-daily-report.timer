@@ -1,0 +1,22 @@
+# Fires fin-daily-report.service at 08:00 local time every day.
+#
+#   systemctl enable --now fin-daily-report.timer
+#   systemctl list-timers fin-daily-report.timer
+#
+# Persistent=true: if the host was down or asleep at 08:00, the run happens as
+# soon as the timer is next active, so a letter is never silently skipped. The
+# letter covers everything since the previous letter's anchor (up to 72 h), so a
+# late run is a longer letter, not a gap.
+
+[Unit]
+Description=Daily fin letter at 08:00
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+# Do not pile onto whatever else the host runs on the hour.
+RandomizedDelaySec=120
+Unit=fin-daily-report.service
+
+[Install]
+WantedBy=timers.target

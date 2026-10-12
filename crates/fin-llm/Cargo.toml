@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MIT-0
+[package]
+name = "fin-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fin-core = { workspace = true }
+aws-sdk-bedrockruntime = { workspace = true }
+aws-smithy-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }

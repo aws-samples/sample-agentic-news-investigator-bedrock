@@ -1,0 +1,33 @@
+{
+  "$schema": "./arms.schema.json",
+  "prefix": "fin",
+  "arms": [
+    {
+      "key": "v1",
+      "kind": "pipeline",
+      "label": "v1 reference arm",
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "dailyBudgetUsd": null
+    },
+    {
+      "key": "v2",
+      "kind": "agent",
+      "label": "v2 investigator",
+      "model": "us.anthropic.claude-fable-5-1",
+      "effort": null,
+      "worldModel": false,
+      "dailyBudgetUsd": 100,
+      "maxInvestigationsPerDay": 200
+    },
+    {
+      "key": "v3",
+      "kind": "agent",
+      "label": "v3 world model",
+      "model": "us.anthropic.claude-fable-5-1",
+      "effort": null,
+      "worldModel": true,
+      "dailyBudgetUsd": 100,
+      "maxInvestigationsPerDay": 200
+    }
+  ]
+}

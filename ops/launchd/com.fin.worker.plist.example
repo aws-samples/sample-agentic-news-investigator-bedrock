@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  fin worker under launchd (macOS) - ONE plist PER ARM.
+
+  This is a template. launchd does not expand ${VAR} placeholders, so render it
+  first and install the rendered copy:
+
+    export ARM=v2 WORLD_MODEL=0 FIN_HOME=/path/to/fin NODE_BIN="$(dirname "$(command -v node)")" \
+           LOG_DIR="$HOME/Library/Logs" CREDENTIAL_PROCESS_DIR=/usr/local/bin \
+           AWS_PROFILE=fin AWS_REGION=us-east-1 \
+           QUEUE_URL=... TABLE=fin-v2-trading TAPE_TABLE=fin-quote-tape \
+           TRANSCRIPT_BUCKET=... EDGAR_CONTACT=you@example.org \
+           DRY_RUN=true MAX_INVESTIGATIONS_PER_DAY=200
+    envsubst < ops/launchd/com.fin.worker.plist.example \
+      > ~/Library/LaunchAgents/com.fin.${ARM}-worker.plist
+    plutil -lint ~/Library/LaunchAgents/com.fin.${ARM}-worker.plist
+
+  Repeat with ARM=v3 WORLD_MODEL=1 and the v3 queue/table/SSM parameters for
+  the world-model arm. HOME is inherited from the GUI session, so it is not set here.
+
+  Install (load) and start:
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.fin.${ARM}-worker.plist
+  Restart after `npm run compile` (new code, same environment):
+    launchctl kickstart -k gui/$UID/com.fin.${ARM}-worker
+  Change ANY EnvironmentVariables value: kickstart is not enough - launchd caches the
+  plist at bootstrap time. Unload and load again:
+    launchctl bootout gui/$UID/com.fin.${ARM}-worker
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.fin.${ARM}-worker.plist
+  Inspect:
+    launchctl print gui/$UID/com.fin.${ARM}-worker
+    tail -f ${LOG_DIR}/fin-${ARM}-worker.log
+
+  Notes
+  - The worker runs the COMPILED entry point (node dist/worker.js). Never point
+    launchd at tsx: it hangs under launchd. `npm run compile` first.
+  - KeepAlive/SuccessfulExit=false: relaunch on crash or non-zero exit, not on a
+    clean exit (the worker exits 0 when told to stop). ThrottleInterval keeps a
+    crash loop to one attempt per 30 s.
+  - PATH must contain the node binary AND the directory of any credential
+    process named in ~/.aws/config; launchd starts jobs with a minimal PATH.
+  - V2_DRY_RUN: the code default is "true" (decide and audit, no fills). Set
+    "false" only when you mean to fill the paper book.
+  - Every V2_* knob and its default is documented in v2/src/config.ts.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fin.${ARM}-worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NODE_BIN}/node</string>
+    <string>dist/worker.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>${FIN_HOME}/v2</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Which arm this process is; prefixes logs and transcripts. -->
+    <key>V2_ARM</key>
+    <string>${ARM}</string>
+    <!-- 0 = control arm (no world model); 1 = world-model arm (v3-style). -->
+    <key>V2_WORLD_MODEL</key>
+    <string>${WORLD_MODEL}</string>
+
+    <!-- Per-arm plumbing from the stack outputs. -->
+    <key>V2_QUEUE_URL</key>
+    <string>${QUEUE_URL}</string>
+    <key>V2_TABLE</key>
+    <string>${TABLE}</string>
+    <key>V2_KILL_SWITCH_PARAM</key>
+    <string>/fin/${ARM}/kill-switch</string>
+    <key>V2_DAILY_BUDGET_PARAM</key>
+    <string>/fin/${ARM}/daily-budget-usd</string>
+    <!-- Shared by every arm. -->
+    <key>V2_TAPE_TABLE</key>
+    <string>${TAPE_TABLE}</string>
+    <key>V2_TRANSCRIPT_BUCKET</key>
+    <string>${TRANSCRIPT_BUCKET}</string>
+
+    <!-- SEC fair-access policy: an identifying contact on every EDGAR request. -->
+    <key>V2_EDGAR_CONTACT</key>
+    <string>${EDGAR_CONTACT}</string>
+
+    <key>V2_DRY_RUN</key>
+    <string>${DRY_RUN}</string>
+    <key>V2_MAX_INVESTIGATIONS_PER_DAY</key>
+    <string>${MAX_INVESTIGATIONS_PER_DAY}</string>
+
+    <!-- AWS: any credential provider chain works. AWS_SDK_LOAD_CONFIG=1 makes the
+         SDK read ~/.aws/config (profiles, credential_process, sso-session). -->
+    <key>AWS_PROFILE</key>
+    <string>${AWS_PROFILE}</string>
+    <key>AWS_REGION</key>
+    <string>${AWS_REGION}</string>
+    <key>AWS_SDK_LOAD_CONFIG</key>
+    <string>1</string>
+
+    <!-- node first, then the credential-process directory, then the system. -->
+    <key>PATH</key>
+    <string>${NODE_BIN}:${CREDENTIAL_PROCESS_DIR}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/fin-${ARM}-worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/fin-${ARM}-worker.log</string>
+</dict>
+</plist>

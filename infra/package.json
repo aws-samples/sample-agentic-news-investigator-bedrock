@@ -1,0 +1,26 @@
+{
+  "name": "fin-infra",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT-0",
+  "bin": {
+    "fin": "bin/fin.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.270.0",
+    "constructs": "10.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "aws-cdk": "2.1142.0",
+    "cdk-nag": "2.38.2",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

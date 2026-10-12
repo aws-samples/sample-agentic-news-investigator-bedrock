@@ -1,0 +1,149 @@
+# fin paper-trading arms under Docker Compose.
+#
+#   cp ops/docker/.env.example ops/docker/.env     # fill in the stack outputs
+#   docker compose -f ops/docker/compose.yml up -d              # v2 + v3 workers
+#   docker compose -f ops/docker/compose.yml --profile dashboard up -d dashboard
+#   docker compose -f ops/docker/compose.yml --profile letter run --rm letter
+#   docker compose -f ops/docker/compose.yml logs -f v2
+#
+# One image, one service per arm. The control arm (v2) and the world-model arm
+# (v3) differ only in environment: their own queue, table, SSM parameters and
+# V2_WORLD_MODEL. Add an arm by copying a block.
+#
+# Credentials: the containers use the standard AWS SDK provider chain.
+#   - Profile: FIN_AWS_DIR (default ~/.aws) is mounted read-only at
+#     /home/nonroot/.aws and AWS_PROFILE selects the profile. A credential_process
+#     named there must exist INSIDE the container, so a static profile, an
+#     sso-session or a role are the practical choices.
+#     The image runs as uid 65532 (`nonroot`): on a Linux host the
+#     mounted directory must be readable by that uid (Docker Desktop does not
+#     enforce host ownership).
+#   - Environment: export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+#     AWS_SESSION_TOKEN in the shell that runs compose; the bare names below pass
+#     them through. Nothing is written into this file or into .env.
+#   - On ECS/EC2, the task or instance role replaces both.
+# Give that identity the stack's WorkerPolicy (output WorkerPolicyArn) and nothing
+# broader; it holds exactly what the workers, letter and dashboard need. See
+# ops/README.md, "Credentials".
+
+x-fin-image: &fin-image
+  build:
+    context: ../../v2
+    dockerfile: ../ops/docker/Dockerfile
+  image: fin-v2:local
+
+x-aws-env: &aws-env
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_PROFILE: ${AWS_PROFILE:-}
+  AWS_SDK_LOAD_CONFIG: "1"
+  # Pass-through from the invoking shell (an unset variable stays unset).
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: ${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:-}
+  AWS_CONTAINER_CREDENTIALS_FULL_URI: ${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}
+
+x-shared-env: &shared-env
+  V2_TAPE_TABLE: ${FIN_TAPE_TABLE:-fin-quote-tape}
+  V2_TRANSCRIPT_BUCKET: ${FIN_TRANSCRIPT_BUCKET:?set FIN_TRANSCRIPT_BUCKET in ops/docker/.env}
+  V2_EDGAR_CONTACT: ${FIN_EDGAR_CONTACT:?set FIN_EDGAR_CONTACT in ops/docker/.env (SEC fair access)}
+  V2_DRY_RUN: ${FIN_DRY_RUN:-true}
+  V2_MAX_INVESTIGATIONS_PER_DAY: ${FIN_MAX_INVESTIGATIONS_PER_DAY:-20}
+
+x-worker: &worker
+  <<: *fin-image
+  restart: unless-stopped
+  init: true
+  # Optional hardening once you have watched a container investigate end to end:
+  #   read_only: true
+  #   tmpfs: ["/tmp", "/home/nonroot/.claude"]
+  # The Agent SDK extracts its runtime under $TMPDIR/claude-<uid> and keeps
+  # session state under ~/.claude; both must stay writable or investigations end
+  # as zero-confidence holds at $0.00 with nothing louder in the log.
+  volumes:
+    - ${FIN_AWS_DIR:-~/.aws}:/home/nonroot/.aws:ro
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+  # Control arm: unassisted investigator, no world model.
+  v2:
+    <<: *worker
+    container_name: fin-v2-worker
+    environment:
+      <<: [*shared-env, *aws-env]
+      V2_ARM: v2
+      V2_WORLD_MODEL: "0"
+      V2_QUEUE_URL: ${FIN_V2_QUEUE_URL:?set FIN_V2_QUEUE_URL in ops/docker/.env}
+      V2_TABLE: ${FIN_V2_TABLE:-fin-v2-trading}
+      V2_KILL_SWITCH_PARAM: /fin/v2/kill-switch
+      V2_DAILY_BUDGET_PARAM: /fin/v2/daily-budget-usd
+
+  # World-model arm: same code, V2_WORLD_MODEL=1, its own queue, table and budget.
+  v3:
+    <<: *worker
+    container_name: fin-v3-worker
+    environment:
+      <<: [*shared-env, *aws-env]
+      V2_ARM: v3
+      V2_WORLD_MODEL: "1"
+      V2_QUEUE_URL: ${FIN_V3_QUEUE_URL:?set FIN_V3_QUEUE_URL in ops/docker/.env}
+      V2_TABLE: ${FIN_V3_TABLE:-fin-v3-trading}
+      V2_KILL_SWITCH_PARAM: /fin/v3/kill-switch
+      V2_DAILY_BUDGET_PARAM: /fin/v3/daily-budget-usd
+
+  # Optional read-only dashboard, loopback only. `--profile dashboard`.
+  dashboard:
+    <<: *fin-image
+    profiles: ["dashboard"]
+    container_name: fin-dashboard
+    command: ["dist/dashboard.js"]
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:4310:4310"
+    volumes:
+      - ${FIN_AWS_DIR:-~/.aws}:/home/nonroot/.aws:ro
+      - fin-reports:/opt/fin/v2/reports:ro
+    environment:
+      <<: *aws-env
+      V2_TABLE: ${FIN_V2_TABLE:-fin-v2-trading}
+      V3_TABLE: ${FIN_V3_TABLE:-fin-v3-trading}
+      V2_TAPE_TABLE: ${FIN_TAPE_TABLE:-fin-quote-tape}
+      V2_QUEUE_URL: ${FIN_V2_QUEUE_URL:?set FIN_V2_QUEUE_URL in ops/docker/.env}
+      # No launchd or systemd inside a container; the process and log probes report "not available".
+      V2_SUPERVISOR: none
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4310/').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # One-shot daily letter. `--profile letter run --rm letter`; schedule it from the
+  # host (cron or a systemd timer) - compose has no scheduler of its own.
+  letter:
+    <<: *fin-image
+    profiles: ["letter"]
+    command: ["dist/daily-report.js"]
+    restart: "no"
+    init: true
+    volumes:
+      - ${FIN_AWS_DIR:-~/.aws}:/home/nonroot/.aws:ro
+      - fin-reports:/opt/fin/v2/reports
+    environment:
+      <<: *aws-env
+      V2_TABLE: ${FIN_V2_TABLE:-fin-v2-trading}
+      V3_TABLE: ${FIN_V3_TABLE:-fin-v3-trading}
+      V2_TAPE_TABLE: ${FIN_TAPE_TABLE:-fin-quote-tape}
+      # Regenerate a past day without moving the anchor:
+      #   REPORT_DAY=2026-01-31 docker compose -f ops/docker/compose.yml --profile letter run --rm letter
+      REPORT_DAY: ${REPORT_DAY:-}
+      V2_LETTER_EFFORT: ${V2_LETTER_EFFORT:-}
+
+volumes:
+  # Letters accumulate here; the letter writes them, the dashboard reads them.
+  fin-reports:

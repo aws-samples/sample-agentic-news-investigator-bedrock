@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT-0
+[package]
+name = "fin-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fin-core = { workspace = true }
+aws-sdk-dynamodb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

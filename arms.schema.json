@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/aws-samples/fin/arms.schema.json",
+  "title": "fin arms registry",
+  "description": "The arms that share one news stream. An arm is a table, a queue, a budget, a kill switch and an env block; every resource name derives from `prefix` and the arm's `key` (see v2/src/arms.ts armResources and infra/lib/names.ts). The shipped arms.json is the reference experiment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prefix", "arms"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "prefix": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Resource-name prefix: <prefix>-<key>-trading, <prefix>-<key>-news, /<prefix>/<key>/kill-switch, <prefix>-quote-tape, <prefix>-events."
+    },
+    "arms": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/arm" }
+    }
+  },
+  "definitions": {
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "kind", "label", "model"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Short unique id used in resource names, V2_ARM, transcript prefixes and snapshot keys."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["agent", "pipeline"],
+          "description": "agent = the TypeScript Agent SDK investigator (v2/); pipeline = the Rust risk-gated Lambda chain (v1), which also produces the news. A pipeline arm's table is <prefix>-trading and its kill switch /<prefix>/kill-switch."
+        },
+        "label": { "type": "string", "minLength": 1, "description": "Human label for the report, dashboard and letter." },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bedrock model id (inference profile) the arm decides with. For an agent arm this is the investigator's master model (V2_MASTER_MODEL overrides)."
+        },
+        "effort": {
+          "type": ["string", "null"],
+          "enum": ["low", "medium", "high", "xhigh", "max", null],
+          "description": "Agent arms: reasoning effort passed to the Agent SDK. null = the SDK default (high). V2_EFFORT overrides."
+        },
+        "worldModel": {
+          "type": "boolean",
+          "default": false,
+          "description": "Agent arms: run with the typed, gated shared world model and the curiosity loop (v3). V2_WORLD_MODEL overrides."
+        },
+        "dailyBudgetUsd": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Initial value of the arm's SSM daily LLM budget (/<prefix>/<key>/daily-budget-usd). The stack seeds the parameter; the worker reads the parameter, not this file. null for a pipeline arm (no metered budget)."
+        },
+        "maxInvestigationsPerDay": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Agent arms: the per-day investigation cap. V2_MAX_INVESTIGATIONS_PER_DAY overrides."
+        }
+      }
+    }
+  }
+}

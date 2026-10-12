@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  fin daily letter under launchd (macOS): runs node dist/daily-report.js once a
+  day at 08:00 local time. One job serves every arm (the letter reads all books).
+
+  Template - render, then install (launchd does not expand ${VAR}):
+
+    export FIN_HOME=/path/to/fin NODE_BIN="$(dirname "$(command -v node)")" \
+           LOG_DIR="$HOME/Library/Logs" CREDENTIAL_PROCESS_DIR=/usr/local/bin \
+           AWS_PROFILE=fin AWS_REGION=us-east-1
+    envsubst < ops/launchd/com.fin.daily-report.plist.example \
+      > ~/Library/LaunchAgents/com.fin.daily-report.plist
+    plutil -lint ~/Library/LaunchAgents/com.fin.daily-report.plist
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.fin.daily-report.plist
+
+  Environment changes need bootout + bootstrap (kickstart re-runs the job with
+  the OLD environment):
+    launchctl bootout gui/$UID/com.fin.daily-report
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.fin.daily-report.plist
+  Run it now, outside the schedule:
+    launchctl kickstart gui/$UID/com.fin.daily-report
+
+  Behaviour worth knowing
+  - StartCalendarInterval fires at the next 08:00 the machine is awake. A job
+    missed while asleep runs once on wake; a machine that is off runs nothing.
+  - The markdown letter is the artifact. The .docx and .pdf copies need pandoc
+    and weasyprint on PATH (Homebrew: /opt/homebrew/bin); when they are missing
+    the report logs the failure and keeps the markdown.
+  - PRINTING IS OPT-IN. Uncomment V2_PRINT below to send the narrative PDF to the
+    CUPS default printer at 08:00 (V2_PRINTER names another queue). Leave it
+    commented out for every hand-run job, so regenerating a letter never
+    reaches the paper tray. On non-macOS hosts see V2_PRINT_CMD in ops/README.md.
+  - A letter whose narrative failed does not advance the anchor; a
+    REPORT_DAY=YYYY-MM-DD regeneration never does.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fin.daily-report</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NODE_BIN}/node</string>
+    <string>dist/daily-report.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>${FIN_HOME}/v2</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AWS_PROFILE</key>
+    <string>${AWS_PROFILE}</string>
+    <key>AWS_REGION</key>
+    <string>${AWS_REGION}</string>
+    <key>AWS_SDK_LOAD_CONFIG</key>
+    <string>1</string>
+    <!-- node, the credential process, pandoc/weasyprint (Homebrew), then the system. -->
+    <key>PATH</key>
+    <string>${NODE_BIN}:${CREDENTIAL_PROCESS_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+
+    <!-- Opt-in: print the narrative PDF after rendering. Uncomment to enable.
+    <key>V2_PRINT</key>
+    <string>1</string>
+    <key>V2_PRINTER</key>
+    <string>Your_CUPS_Queue_Name</string>
+    -->
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/fin-daily-report.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/fin-daily-report.log</string>
+</dict>
+</plist>

@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: MIT-0
+#
+# The same gates as .github/workflows/ci.yml, for the GitLab home of the
+# repository: v1 tests + cargo audit, v2 typecheck/tests/npm audit, infra tests
+# + cdk synth (cdk-nag), detect-secrets, the publication scrub, ASH (local mode,
+# see the job) and Ferret. Any failure fails the pipeline.
+#
+# Every image is pulled from ECR Public and pinned by digest (the tag it was
+# resolved from is kept beside it), and every tool installed inside a job is
+# pinned to a version, so a moved tag cannot change what runs. Bump deliberately.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+default:
+  interruptible: true
+
+variables:
+  RUST_IMAGE: public.ecr.aws/docker/library/rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
+  NODE_IMAGE: public.ecr.aws/docker/library/node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+  PYTHON_IMAGE: public.ecr.aws/docker/library/python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+  npm_config_cache: $CI_PROJECT_DIR/.npm
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  PIP_CACHE_DIR: $CI_PROJECT_DIR/.pip
+  # The shared runners are a Kubernetes executor whose default pod memory is too
+  # small for cdk synth and a workspace cargo build (both were OOM-killed);
+  # these are the executor's per-job overrides.
+  KUBERNETES_MEMORY_REQUEST: 4Gi
+  KUBERNETES_MEMORY_LIMIT: 6Gi
+
+stages:
+  - test
+  - scan
+
+rust:
+  stage: test
+  image: $RUST_IMAGE
+  cache:
+    key: { files: [Cargo.lock] }
+    paths: [.cargo/registry, target]
+  variables:
+    CARGO_BUILD_JOBS: "2"
+  script:
+    - cargo test --workspace
+    - cargo install cargo-audit --version =0.22.2 --locked
+    - cargo audit
+
+v2:
+  stage: test
+  image: $NODE_IMAGE
+  cache:
+    key: { files: [v2/package-lock.json] }
+    paths: [.npm]
+  script:
+    - cd v2
+    - npm ci
+    - npm run build
+    - npm test
+    - npm audit --audit-level=high
+
+infra:
+  stage: test
+  image: $NODE_IMAGE
+  cache:
+    key: { files: [infra/package-lock.json] }
+    paths: [.npm]
+  variables:
+    # Synth only: bundling the twelve Rust Lambdas is a deploy-time cost, not a
+    # CI one. FIN_SKIP_BUNDLING (bin/fin.ts) disables it; the CLI's own
+    # `-c aws:cdk:bundling-stacks=[]` does not, because the CLI's value wins.
+    FIN_SKIP_BUNDLING: "1"
+    # Synth of the whole stack plus cdk-nag outgrows Node's default heap.
+    NODE_OPTIONS: --max-old-space-size=3072
+  script:
+    - cd infra
+    - npm ci
+    - npm test
+    # The app attaches cdk-nag's AwsSolutionsChecks, so synth fails on any
+    # unsuppressed AwsSolutions error; suppressions and reasons: lib/nag.ts.
+    - npx cdk synth -c contactEmail=ci@example.invalid
+  artifacts:
+    # ASH's Checkov reads the synthesized templates (suppressions in .ash/.ash.yaml).
+    paths: [infra/cdk.out/*.template.json]
+    expire_in: 1 day
+
+secrets:
+  stage: test
+  image: $PYTHON_IMAGE
+  cache:
+    key: pip-detect-secrets
+    paths: [.pip]
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git > /dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - pip install -q detect-secrets==1.5.0
+    # The hook form fails on any finding that is not already in the baseline;
+    # `detect-secrets scan --baseline` alone would silently rewrite it.
+    - detect-secrets-hook --baseline .secrets.baseline $(git ls-files)
+
+hygiene:
+  stage: test
+  image: $NODE_IMAGE
+  script:
+    - scripts/oss/scrub-check.sh
+    - scripts/oss/spdx.sh --check
+    - scripts/oss/gen-env-example.sh --check
+    - node scripts/render-threat-model.mjs --check
+
+ferret:
+  stage: test
+  image: $PYTHON_IMAGE
+  cache:
+    key: pip-ferret
+    paths: [.pip]
+  script:
+    - pip install -q ferret-scan==1.10.0
+    # Run directly rather than through ASH: as an ASH plugin it crawled
+    # target/ and node_modules for minutes. Fails on any high/medium hit not
+    # in .ferret-scan-suppressions.yaml (reviewed false positives, each with a
+    # reason). Ferret 1.10 quirks: the suppression file is only honoured when
+    # passed explicitly, and --pre-commit-mode exits 2 even when every finding
+    # is suppressed, so the gate is "the JSON result list is empty".
+    - >-
+      ferret-scan --file . --recursive --respect-gitignore
+      --exclude ".claude,.ash,.npm,.cargo,.pip,node_modules,target,cdk.out,dist,v2/reports,.git"
+      --checks SECRETS,CREDIT_CARD,SSN,PASSPORT,EMAIL,METADATA
+      --confidence high,medium
+      --suppression-file .ferret-scan-suppressions.yaml
+      --format json --quiet > ferret.json || true
+    - |
+      python3 - <<'EOF'
+      import json, sys
+      d = json.load(open("ferret.json"))
+      hits = d["results"] if isinstance(d, dict) else d
+      for h in hits:
+          print(f'{h.get("filename")}:{h.get("line_number")} {h.get("type")} ({h.get("confidence_level")})')
+      sys.exit(1 if hits else 0)
+      EOF
+
+ash:
+  stage: scan
+  needs: [infra]
+  # Local mode: the shared runners allow no privileged containers, so there is no
+  # Docker daemon for container mode. The script installs the scanners ASH's own
+  # image carries (Grype, Syft by checksum; cfn-nag from ASH's Gemfile.lock;
+  # Opengrep by checksum; Bandit, Checkov, Semgrep at the versions .ash/.ash.yaml pins) and fails
+  # if any of them could not run.
+  image: $PYTHON_IMAGE
+  script:
+    - scripts/ci/ash-local.sh
+  artifacts:
+    when: always
+    paths: [.ash/ash_output/reports/]
+    expire_in: 30 days
