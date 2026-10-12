@@ -24,7 +24,7 @@ import {
 // Pure formatting over fixture rows shaped exactly as replay.ts writes them.
 // Nothing here reads DynamoDB.
 
-const FILE_HASH = "9f2c4d6e8a1b3c5d7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d";  // pragma: allowlist secret
+const FILE_HASH = "3333333333333333333333333333333333333333333333333333333333333333";
 const ITEMS_HASH = "1111111111111111111111111111111111111111111111111111111111111111";
 const OTHER_ITEMS = "2222222222222222222222222222222222222222222222222222222222222222";
 
@@ -214,7 +214,7 @@ describe("formatCompareTable", () => {
   });
 
   it("shortHash", () => {
-    expect(shortHash(FILE_HASH)).toBe("9f2c4d6e8a1b");  // pragma: allowlist secret
+    expect(shortHash(FILE_HASH)).toBe("333333333333");
     expect(shortHash(null)).toBe("-");
   });
 });

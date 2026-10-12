@@ -31,7 +31,7 @@ const INDEX = [
 
 const HEADER = [
   "<html><body><pre>",
-  "&lt;ACCEPTANCE-DATETIME&gt;20260901161303",
+  "&lt;ACCEPTANCE-DATETIME&gt;20260901161340",
   "CONFORMED SUBMISSION TYPE:\t8-K",
   "ITEM INFORMATION:\t\tResults of Operations and Financial Condition",
   "ITEM INFORMATION:\t\tFinancial Statements and Exhibits",
@@ -71,7 +71,7 @@ describe("EDGAR daily index", () => {
 describe("filing header", () => {
   it("reads acceptance time (Eastern -> UTC) and maps item names to numbers", () => {
     const h = parseFilingHeader(HEADER)!;
-    expect(h.acceptedAt).toBe("2026-09-01T20:13:03.000Z"); // EDT, UTC-4
+    expect(h.acceptedAt).toBe("2026-09-01T20:13:40.000Z"); // EDT, UTC-4
     expect(h.items).toEqual([
       "Item 2.02: Results of Operations and Financial Condition",
       "Item 9.01: Financial Statements and Exhibits",
@@ -92,7 +92,7 @@ describe("filing header", () => {
       source_family: "edgar",
       headline: "8-K - EXAMPLE CORP (0000000001) (Filer)",
       tickers_hint: ["EXA"],
-      published_at: "2026-09-01T20:13:03.000Z",
+      published_at: "2026-09-01T20:13:40.000Z",
     });
     expect(item.summary).toContain("AccNo: 0000000001-26-000002");
     expect(item.summary).toContain("Item 2.02: Results of Operations");
