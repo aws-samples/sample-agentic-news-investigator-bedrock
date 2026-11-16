@@ -20,6 +20,8 @@ import { config, arms } from "./config.js";
 import { ddb } from "./ledger.js";
 import { triage } from "./triage.js";
 import { enrichForTriage } from "./enrich.js";
+import { fromStoredTriage, type StoredTriage } from "./bench/stored-triage.js";
+import { contractsFor } from "./triage-contracts.js";
 import { putAudit } from "./audit.js";
 import { addSpend } from "./budget.js";
 import { resolveAsOf, historicalReturn } from "./quotes/asof.js";
@@ -97,6 +99,7 @@ import type { NewsItem } from "./types.js";
  *   node dist/replay.js --name bench-X --max 20 --days 7 --end-days-ago 7 \
  *     [--variants live,no-mandate] [--threshold 0.45] [--budget-usd 10] \
  *     [--seed-cash 100000] [--max-events 200] [--overwrite]
+ *     [--triage-from <bench>]   (re-use that run's triage verdicts: same events, no triage spend)
  *     [--guardrail-id <id> --guardrail-version <n>]   (required by --variants …,guardrail)
  *   node dist/replay.js --dump bench/corpus/week.jsonl --days 7 --end-days-ago 7 [--public-domain] [--note "…"]
  *   node dist/replay.js --corpus bench/corpus/week.jsonl --name bench-X [--variants a,b] [--max 20] …
@@ -265,7 +268,12 @@ async function triageEvent(raw: NewsItem, benchName: string, threshold: number):
   // Same pre-triage step as the worker: a filing is read by accession (immutable,
   // so no lookahead) and summarized before triage sees it.
   const item = await enrichForTriage(raw, { log: () => {} });
-  const verdict = await triage(item);
+  // As-of the event: only contracts that existed and were open then, no prices.
+  const openContracts =
+    config.triageContracts && config.universe === "prediction"
+      ? await contractsFor(item, { asOfMs: Date.parse(item.published_at) })
+      : undefined;
+  const verdict = await triage(item, [], [], undefined, openContracts);
   await putAudit(
     `${benchName}#${item.id}`,
     "bench-triage",
@@ -274,10 +282,47 @@ async function triageEvent(raw: NewsItem, benchName: string, threshold: number):
       published_at: item.published_at,
       source_family: item.source_family,
       ...verdict,
-      ...(item.enrichment ? { filing_summary: item.enrichment.summary, filing_items: item.enrichment.items } : {}),
+      ...(openContracts ? { open_contracts: openContracts.map((c) => c.symbol) } : {}),
+      ...(item.enrichment
+        ? { filing_summary: item.enrichment.summary, filing_items: item.enrichment.items, filing_tickers: item.enrichment.tickers }
+        : {}),
     },
     { pkPrefix: "BENCH#" },
   );
+  return toBenchEvent(item, verdict, threshold);
+}
+
+/** Every `bench-triage` row of an earlier run, by item id (read-only scan of BENCH# rows). */
+async function loadStoredTriage(sourceBench: string): Promise<Map<string, StoredTriage>> {
+  const prefix = `BENCH#${sourceBench}#`;
+  const out = new Map<string, StoredTriage>();
+  let key: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb.send(
+      new ScanCommand({
+        TableName: config.table,
+        FilterExpression: "begins_with(pk, :p) AND #s = :t",
+        ExpressionAttributeNames: { "#s": "stage" },
+        ExpressionAttributeValues: { ":p": prefix, ":t": "bench-triage" },
+        ExclusiveStartKey: key,
+      }),
+    );
+    for (const it of r.Items ?? []) out.set(String(it.pk).slice(prefix.length), it.payload as StoredTriage);
+    key = r.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (key);
+  return out;
+}
+
+/** An event from a stored verdict: no enrichment call, no triage call, the row copied under this bench. */
+async function storedTriageEvent(
+  raw: NewsItem,
+  row: StoredTriage,
+  sourceBench: string,
+  benchName: string,
+  threshold: number,
+): Promise<BenchEvent> {
+  const { item, verdict } = fromStoredTriage(raw, row, sourceBench);
+  await putAudit(`${benchName}#${item.id}`, "bench-triage", { ...row, triage_from: sourceBench }, { pkPrefix: "BENCH#" });
   return toBenchEvent(item, verdict, threshold);
 }
 
@@ -303,6 +348,8 @@ interface BenchOptions {
   threshold: number;
   budgetUsd: number;
   seedCash: number;
+  /** Re-use this earlier bench's triage instead of triaging (--triage-from). */
+  triageFrom?: string;
 }
 
 /** Fail before any spend when a summary already exists under this name#variant (a re-run would overwrite it). */
@@ -361,8 +408,17 @@ async function runBench(inp: BenchInput, opts: BenchOptions): Promise<void> {
   );
 
   // Phase 1: triage every event once, concurrently (cheap Haiku calls); shared by all variants.
+  // With --triage-from, the earlier run's verdicts are used instead; an item it
+  // has no row for (its triage failed there) is skipped here too.
+  const stored = opts.triageFrom ? await loadStoredTriage(opts.triageFrom) : null;
+  if (stored) console.log(`[replay] --triage-from ${opts.triageFrom}: ${stored.size} stored verdicts`);
   const events = await mapLimit(items, 8, (item) =>
-    triageEvent(item, name, threshold).catch((e) => {
+    (stored
+      ? stored.has(item.id)
+        ? storedTriageEvent(item, stored.get(item.id)!, opts.triageFrom!, name, threshold)
+        : Promise.resolve(null)
+      : triageEvent(item, name, threshold)
+    ).catch((e) => {
       console.error(`[replay] triage failed for ${item.id}:`, e);
       return null;
     }),
@@ -674,7 +730,7 @@ async function main(): Promise<void> {
     console.log(`[replay] corpus ${corpusFile}: ${corpus.items.length} items, source=${corpus.header.source}, created ${corpus.header.created_at}${corpus.header.note ? `, note: ${corpus.header.note}` : ""}`);
     await runBench(
       { items, input: "corpus", start, end, corpusFile, corpusHash: hash, header: corpus.header },
-      { name, variants, maxInvestigations, threshold, budgetUsd, seedCash },
+      { name, variants, maxInvestigations, threshold, budgetUsd, seedCash, triageFrom: arg("triage-from", "") || undefined },
     );
     return;
   }
@@ -687,7 +743,7 @@ async function main(): Promise<void> {
   const items = await drainArchive(name, start, end, maxEvents);
   await runBench(
     { items, input: "archive", start, end, corpusFile: null, corpusHash: null, header: null },
-    { name, variants, maxInvestigations, threshold, budgetUsd, seedCash },
+    { name, variants, maxInvestigations, threshold, budgetUsd, seedCash, triageFrom: arg("triage-from", "") || undefined },
   );
 }
 

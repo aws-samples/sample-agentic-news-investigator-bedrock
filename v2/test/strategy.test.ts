@@ -88,7 +88,7 @@ describe("VARIANTS / getStrategy", () => {
       names.add(s.name);
     }
     expect(names.size).toBe(Object.keys(VARIANTS).length);
-    expect([...names].sort()).toEqual(["guardrail", "live", "no-content-rule", "no-mandate", "terse", "yield-triage"]);
+    expect([...names].sort()).toEqual(["fable", "guardrail", "live", "no-content-rule", "no-mandate", "opus", "terse", "triage-handoff", "yield-triage"]);
   });
   it("getStrategy throws with the list of known names", () => {
     expect(() => getStrategy("nope")).toThrow(/unknown strategy "nope"/);
@@ -187,6 +187,23 @@ describe("terse variant", () => {
     await probe.decide({ item, hypotheses: [] });
     expect(calls[0][5]).toEqual({ maxTurns: 6 });
     expect(terse.description).toMatch(/maxTurns 6/);
+  });
+});
+
+describe("model variants", () => {
+  it("forward their model to investigate and nothing else", async () => {
+    const { calls, fn } = recorder();
+    await agentSdkStrategy({ name: "fable", model: "us.anthropic.claude-fable-5-1", investigateFn: fn }).decide({
+      item,
+      hypotheses: [],
+    });
+    expect(calls[0][5]).toEqual({ model: "us.anthropic.claude-fable-5-1" });
+  });
+
+  it("are registered with the two model ids", () => {
+    expect(VARIANTS.fable().description).toContain("us.anthropic.claude-fable-5-1");
+    expect(VARIANTS.opus().description).toContain("us.anthropic.claude-opus-5-5");
+    expect(getStrategy("opus").name).toBe("opus");
   });
 });
 

@@ -66,6 +66,27 @@ export function bookUtilization(book: BookSnapshot): Utilization {
   return { equityUsd, deployedUsd: gross, deployedPct, positions: book.positions.length };
 }
 
+/**
+ * The utilization the agent sizes against when V2_SIZING_MULTIPLIER is above 1: equity scaled by
+ * the multiplier, deployment measured against that scaled equity. Positions and deployed dollars
+ * are untouched — they are real. A multiplier of 1 returns the input unchanged.
+ */
+export function sizingUtilization(util: Utilization, multiplier: number): Utilization {
+  if (!(multiplier > 1) || util.equityUsd === null) return util;
+  const equityUsd = util.equityUsd * multiplier;
+  return { ...util, equityUsd, deployedPct: equityUsd > 0 ? util.deployedUsd / equityUsd : null };
+}
+
+/** One line telling the agent what the scaled equity is and that cash is still the limit. */
+export function sizingNote(accountEquityUsd: number | null, cashUsd: number | null, multiplier: number): string | null {
+  if (!(multiplier > 1) || accountEquityUsd === null) return null;
+  return (
+    `Sizing: the equity in the mandate above is the SIZING equity, ${multiplier}× the account's ` +
+    `${usd(accountEquityUsd)} (operator setting). Size every position against the sizing equity. ` +
+    `Cash is the hard limit: ${cashUsd === null ? "unknown" : usd(cashUsd)} on hand — an order the account cannot fund is cut down or refused.`
+  );
+}
+
 const usd = (x: number) => `$${Math.round(x).toLocaleString("en-US")}`;
 const pct = (x: number) => `${Math.round(x * 100)}%`;
 
@@ -78,6 +99,7 @@ export function renderMandate(
   watchlist: WatchIdea[],
   m: typeof config.mandate = config.mandate,
   now = new Date(),
+  universe: "all" | "prediction" = config.universe,
 ): string {
   const lines: string[] = [];
   const eq = util.equityUsd;
@@ -104,9 +126,15 @@ export function renderMandate(
       lines.push(`Status: within the mandate.`);
     }
     lines.push(
-      `Conviction → size at current equity: 0.55 ≈ 1% (${usd(eq * 0.01)}), ` +
-        `0.60–0.65 ≈ 2–3% (${usd(eq * 0.02)}–${usd(eq * 0.03)}), ` +
-        `0.70+ ≈ 4–6% (${usd(eq * 0.04)}–${usd(eq * 0.06)}), cap ${pct(m.maxPositionPct)} (${usd(eq * m.maxPositionPct)}).`,
+      universe === "prediction" && config.fastDesk
+        ? `Edge → size at current equity: stake ≈ 0.25 × (p − c)/(1 − c) of equity for fair p at price c — e.g. p 0.60 at c 0.50 ≈ 5% (${usd(eq * 0.05)}), ` +
+            `p 0.30 at c 0.20 ≈ 3% (${usd(eq * 0.031)}); cap ${pct(m.maxPositionPct)} (${usd(eq * m.maxPositionPct)}) per contract, ~30% (${usd(eq * 0.3)}) per theme.`
+        : universe === "prediction"
+        ? `Conviction → size at current equity: 0.60 ≈ 3% (${usd(eq * 0.03)}), 0.70 ≈ 6% (${usd(eq * 0.06)}), ` +
+            `0.80+ ≈ 10–15% (${usd(eq * 0.1)}–${usd(eq * 0.15)}), cap ${pct(m.maxPositionPct)} (${usd(eq * m.maxPositionPct)}) per contract, ~30% (${usd(eq * 0.3)}) per theme.`
+        : `Conviction → size at current equity: 0.55 ≈ 1% (${usd(eq * 0.01)}), ` +
+            `0.60–0.65 ≈ 2–3% (${usd(eq * 0.02)}–${usd(eq * 0.03)}), ` +
+            `0.70+ ≈ 4–6% (${usd(eq * 0.04)}–${usd(eq * 0.06)}), cap ${pct(m.maxPositionPct)} (${usd(eq * m.maxPositionPct)}).`,
     );
   }
   if (watchlist.length === 0) {

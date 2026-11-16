@@ -12,8 +12,12 @@ strategies can be compared on identical inputs.
 
 > **Notice — read before deploying**
 >
-> - **Paper trading only.** There is no broker, no exchange connectivity and no real money in
->   the trading path. Fills are DynamoDB rows against live public quotes.
+> - **Paper trading by default.** As shipped there is no broker, no exchange connectivity and
+>   no real money in the trading path. Fills are DynamoDB rows against live public quotes.
+> - **One opt-in exception: live trading on Kalshi.** `v2/src/live` can route a single arm's
+>   orders to Kalshi with real money. It is off unless you set `V2_LIVE`, it needs Kalshi's
+>   permission for this use, and you can lose everything in the account. Read
+>   [`docs/LIVE_TRADING.md`](docs/LIVE_TRADING.md) before touching it.
 > - **Not investment advice.** Nothing this system produces is a recommendation. It is a
 >   research instrument for studying model judgment.
 > - **Non-production sample code.** This is sample code, for non-production usage. You
@@ -200,6 +204,15 @@ Converse adapter for other vendors is on the [roadmap](docs/ROADMAP.md). Prompt 
 variants that do not need a new arm go through `v2/src/strategy.ts` and are compared on the
 bench.
 
+## Prediction desk and fast desk (optional)
+
+An agent arm can be restricted to prediction-market contracts (`V2_UNIVERSE=prediction`) and
+given a fast-reaction package (`V2_FAST_DESK=1`): a 1–24 hour horizon, edge-based sizing, an
+exit plan on every position and a market-first sweep. Both are paper trading, both are off by
+default, and the shipped arms are unchanged by them. Setup and every knob:
+[`docs/PREDICTION_DESK.md`](docs/PREDICTION_DESK.md). The opt-in real-money path for a fast
+desk on Kalshi is documented separately in [`docs/LIVE_TRADING.md`](docs/LIVE_TRADING.md).
+
 ## Run the bench
 
 ```bash
@@ -276,6 +289,8 @@ input on every turn: about $0.30–$0.55 per investigation ([`docs/COST.md`](doc
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | event flow, the one-decision-path rule, resolver, execution rules, tape and as-of bench, world-model gate, table layout, search and permissions (IAM) |
 | [`docs/COST.md`](docs/COST.md) | what costs money, the breaker, typical figures, how to cap |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | running the workers, the letter, the dashboard, kill switch and budgets, failure signatures |
+| [`docs/PREDICTION_DESK.md`](docs/PREDICTION_DESK.md) | the optional prediction desk and fast desk: setup, environment, knobs, bench |
+| [`docs/LIVE_TRADING.md`](docs/LIVE_TRADING.md) | the opt-in real-money path on Kalshi: warnings, setup, limits, sizing, runbook |
 | [`docs/BENCHMARK.md`](docs/BENCHMARK.md) | the reproducible bench: corpus, compare, what it can and cannot claim |
 | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) | security review input |
 | [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md) | services, terms, dependency notices |

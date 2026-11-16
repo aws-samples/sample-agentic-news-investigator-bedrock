@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT-0
 import { config } from "./config.js";
 import { bedrock as client } from "./bedrock.js";
-import { TRIAGE_SYSTEM, TRIAGE_SYSTEM_WORLD } from "./prompts.js";
+import { TRIAGE_SYSTEM, TRIAGE_SYSTEM_PREDICTION, TRIAGE_SYSTEM_WORLD } from "./prompts.js";
 import { priceUsage, type NormalizedUsage } from "./pricing.js";
 import type { NewsItem } from "./types.js";
+import type { OpenContract } from "./triage-contracts.js";
 import { blockedSide, guardedCall, messageIntervened, type GuardrailRef } from "./guardrail.js";
 import { activeGuardrail } from "./guardrail-runtime.js";
 
@@ -41,6 +42,7 @@ export async function triage(
   heldSymbols: unknown[] = [],
   recent: RecentInvestigation[] = [],
   guardrail?: GuardrailRef | null,
+  openContracts?: OpenContract[],
 ): Promise<TriageVerdict> {
   // Only the event's own text is guard content; positions and our own
   // investigation log are trusted context. Off → byte-identical to before.
@@ -49,7 +51,7 @@ export async function triage(
     g.body({
       model: config.triageModel,
       max_tokens: 600,
-      system: config.worldModel ? TRIAGE_SYSTEM_WORLD : TRIAGE_SYSTEM,
+      system: config.universe === "prediction" ? TRIAGE_SYSTEM_PREDICTION : config.worldModel ? TRIAGE_SYSTEM_WORLD : TRIAGE_SYSTEM,
       messages: [
         {
           role: "user" as const,
@@ -61,6 +63,15 @@ export async function triage(
             tickers_hint: item.tickers_hint,
             held_positions: heldSymbols,
             recent_investigations: recent,
+            // Only with V2_TRIAGE_CONTRACTS (prediction desks); absent, the request is byte-identical to before.
+            ...(openContracts
+              ? {
+                  open_contracts: {
+                    note: "Open contracts whose titles match this item's subjects (venue search, not exhaustive). If one is listed, a contract exists: score how much this news should move it. An empty list means the search found none, not that none exist.",
+                    contracts: openContracts.map((c) => ({ symbol: c.symbol, title: c.title, closes: c.closes ?? null })),
+                  },
+                }
+              : {}),
           }),
         },
       ],

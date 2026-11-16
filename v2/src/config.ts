@@ -13,6 +13,17 @@ import { loadArms, resolveArmDefaults } from "./arms.js";
 export const arms = loadArms();
 const armDefaults = resolveArmDefaults(process.env, arms);
 
+/** V2_SIZING_MULTIPLIER: a finite number in [1, 10]; anything else is 1 (off). */
+export function clampMultiplier(raw: string | undefined): number {
+  const n = Number(raw ?? "1");
+  return Number.isFinite(n) ? Math.min(10, Math.max(1, n)) : 1;
+}
+
+/** V2_LIVE: exactly "demo" or "prod" turns the live path on; anything else is off. */
+export function liveMode(raw: string | undefined): "off" | "demo" | "prod" {
+  return raw === "demo" || raw === "prod" ? raw : "off";
+}
+
 export const config = {
   region: process.env.AWS_REGION ?? "us-east-1",
   /** Resource-name prefix shared by every arm (arms.json `prefix`). */
@@ -74,6 +85,25 @@ export const config = {
   watchMovePredictionPct: Number(process.env.V2_WATCH_MOVE_PREDICTION_PCT ?? "10"),
   watchCooldownHours: Number(process.env.V2_WATCH_COOLDOWN_HOURS ?? "4"),
   /**
+   * Alert threshold scaled to volatility (guards.ts alertThresholdPct): max(V2_WATCH_MOVE_PCT,
+   * k × 20-day daily σ) for equities and futures. 0 = off (fixed threshold). 1.5 cut position
+   * alerts by roughly 60% in the study that motivated it.
+   */
+  watchVolSigma: Number(process.env.V2_WATCH_VOL_SIGMA ?? "0"),
+  /** Daily review may exit/trim/cover/hold but never open or add (guards.ts reviewRefusal). */
+  reviewManageOnly: (process.env.V2_REVIEW_MANAGE_ONLY ?? "") === "1",
+  /** New exposure one decision may open across its actions, % of equity at cost. 0 = off. */
+  maxNewExposurePct: Number(process.env.V2_MAX_NEW_EXPOSURE_PCT ?? "0"),
+  /**
+   * Sizing multiplier (mandate.ts sizingUtilization). The equity the agent SIZES against — the
+   * mandate's ladder and deployment figures, and the per-decision exposure cap — is account
+   * equity × this. 1 (default) changes nothing. Above 1 is leverage on the agent's own sizing
+   * rule: every position, drawdown and fee scales with it, and at 5 a quarter-Kelly desk bets
+   * 1.25× full Kelly. Cash is still the hard limit (an order the account cannot fund is cut down or refused)
+   * and the live limits (V2_LIVE_MAX_*) are in real dollars. Clamped to [1, 10]. docs/LIVE_TRADING.md.
+   */
+  sizingMultiplier: clampMultiplier(process.env.V2_SIZING_MULTIPLIER),
+  /**
    * A price move on a book too thin to transact against is not an event worth an
    * investigation: on a $16-deep contract the bid ticking 0.13 -> 0.10 is one
    * order disappearing. Alerts need this much resting depth (when the venue
@@ -81,6 +111,13 @@ export const config = {
    */
   watchMinDepthUsd: Number(process.env.V2_WATCH_MIN_DEPTH_USD ?? "500"),
   watchMaxSpreadFrac: Number(process.env.V2_WATCH_MAX_SPREAD_FRAC ?? "0.25"),
+  /**
+   * A position line worth less than this is dust (dust.ts): exits close it exactly
+   * instead of leaving it, the watcher does not investigate it, and the book
+   * context and mandate leave it out. Rounding remainders otherwise accumulate
+   * and come to dominate position alerts.
+   */
+  dustUsd: Number(process.env.V2_DUST_USD ?? "25"),
   /** Defer the daily review while every position was re-underwritten this recently... */
   reviewSkipIfFreshMin: Number(process.env.V2_REVIEW_SKIP_IF_FRESH_MIN ?? "60"),
   /** ...but never past this many hours after the review hour. */
@@ -148,6 +185,49 @@ export const config = {
    * V2_WORLD_MODEL=1|0 wins, else the arm's `worldModel` in arms.json.
    */
   worldModel: armDefaults.worldModel,
+  /**
+   * The prediction-market desk (V2_UNIVERSE=prediction). The arm trades only Polymarket/Kalshi
+   * contracts, plus futures as a hedge or the most direct expression of a contract thesis
+   * (gross futures ≤ futuresMaxPct of equity); everything else is refused at execution
+   * (universe.ts). "all" (default) is the original anything-with-a-quote universe, and the
+   * existing arms' prompts are byte-identical with it. Both venues are opt-in sources
+   * (sources.ts, docs/THIRD_PARTY_NOTICES.md): read their terms before enabling them.
+   */
+  universe: ((process.env.V2_UNIVERSE ?? "all").toLowerCase() === "prediction" ? "prediction" : "all") as "all" | "prediction",
+  futuresMaxPct: Number(process.env.V2_FUTURES_MAX_PCT ?? "0.20"),
+  /**
+   * The fast desk (V2_FAST_DESK=1): the prediction desk plus the fast-reaction package — 1–24 h
+   * horizon, fair_probability + edge (quarter-Kelly) sizing, anchor on the market price, an exit
+   * plan (target/stop/deadline) with a time-stop alert, mid-price contract alerts, quote
+   * freshness, stop early. Only meaningful with universe "prediction"; every other arm's prompt
+   * and tool schema is byte-identical with it off (test/prompts-arms.test.ts).
+   */
+  fastDesk: (process.env.V2_FAST_DESK ?? "") === "1",
+  /**
+   * Prediction desks: triage is shown the open contracts matching the item's subjects
+   * (triage-contracts.ts) instead of guessing whether one exists. Off by default: it changes
+   * what triage admits, so bench it first.
+   */
+  triageContracts: (process.env.V2_TRIAGE_CONTRACTS ?? "") === "1",
+  /**
+   * The investigator gets triage's whole read (materiality, event type, regions,
+   * touches_positions, rationale), not only its hypotheses, so it can see when triage's
+   * reasoning is the weak part. Changes the user message, not the system prompt.
+   */
+  triageHandoff: (process.env.V2_TRIAGE_HANDOFF ?? "") === "1",
+  /**
+   * Hold a storm advisory cycle's products this many seconds and triage the most informative one
+   * (storm-cycle.ts); 0 = off, the first product to arrive stands for the cycle (queue order).
+   */
+  stormHoldSecs: Number(process.env.V2_STORM_HOLD_SECS ?? "0"),
+  /**
+   * Triage's held_positions: the real book (largest first, side, kind, size, one-line thesis, no
+   * dust; triage-book.ts) instead of the bare symbol list. Not in v3, whose triage gets the world
+   * model's exposures for the held book instead.
+   */
+  triageBook: (process.env.V2_TRIAGE_BOOK ?? "") === "1",
+  /** Prediction desk: the market-first sweep (sweep.ts) runs every this many minutes; 0 = off. */
+  sweepIntervalMin: Number(process.env.V2_SWEEP_INTERVAL_MIN ?? "0"),
   curiosityIntervalMin: Number(process.env.V2_CURIOSITY_INTERVAL_MIN ?? "60"),
   curiosityCooldownHours: Number(process.env.V2_CURIOSITY_COOLDOWN_HOURS ?? "6"),
 
@@ -196,8 +276,8 @@ export const config = {
   mandate: {
     minDeployedPct: Number(process.env.V2_MANDATE_MIN_DEPLOYED ?? "0.30"),
     maxDeployedPct: Number(process.env.V2_MANDATE_MAX_DEPLOYED ?? "0.70"),
-    minPositions: 4,
-    maxPositions: 12,
+    minPositions: Number(process.env.V2_MANDATE_MIN_POSITIONS ?? "4"),
+    maxPositions: Number(process.env.V2_MANDATE_MAX_POSITIONS ?? "12"),
     maxPositionPct: Number(process.env.V2_MANDATE_MAX_POSITION ?? "0.10"),
     watchlistHours: Number(process.env.V2_MANDATE_WATCHLIST_HOURS ?? "72"),
   },
@@ -266,6 +346,39 @@ export const config = {
    * bench meters always, under its own BENCH# scope.
    */
   meterTriage: ["1", "true"].includes((process.env.V2_METER_TRIAGE ?? "").trim().toLowerCase()),
+
+  /**
+   * Charge Kalshi's taker fee on PAPER fills of Kalshi contracts (exec.ts): 0.07 × C × P × (1 − P),
+   * rounded up per order, folded into the fill price. Off by default because it changes a running
+   * book's accounting; turn it on before comparing a paper desk with a live one — the fee is a
+   * large share of a short-horizon desk's gross result.
+   */
+  kalshiFees: (process.env.V2_KALSHI_FEES ?? "") === "1",
+  /**
+   * Shadow mode (live/shadow.ts): for every paper buy/sell on a Kalshi contract, read the real book
+   * and audit what an IOC order would have got (`v2-shadow`). Observer only; public data, no key.
+   */
+  shadowKalshi: (process.env.V2_SHADOW_KALSHI ?? "") === "1",
+  /**
+   * REAL MONEY (live/broker.ts via live/route.ts): off | demo | prod. Off by default and never set
+   * by any shipped template. Anything but off routes every buy/sell to Kalshi; other venues are
+   * refused. Needs V2_KALSHI_KEY_ID + V2_KALSHI_KEY_PATH (or V2_KALSHI_KEY_PEM). Run it as its own
+   * arm (own table seeded with the real balance), never on a paper arm. docs/LIVE_TRADING.md.
+   */
+  live: liveMode(process.env.V2_LIVE),
+  /** Live trading proceeds only while this SSM parameter is exactly "false"; missing or unreadable halts it. */
+  liveKillSwitchParam: process.env.V2_LIVE_KILL_SWITCH_PARAM ?? `/${arms.prefix}/${armDefaults.arm}/live-kill-switch`,
+  /** Hard limits for the live arm (live/limits.ts), USD. Defaults are sized for a first $500 account. */
+  liveLimits: {
+    maxOrderUsd: Number(process.env.V2_LIVE_MAX_ORDER_USD ?? "50"),
+    maxPositionUsd: Number(process.env.V2_LIVE_MAX_POSITION_USD ?? "100"),
+    maxDeployedUsd: Number(process.env.V2_LIVE_MAX_DEPLOYED_USD ?? "400"),
+    dailyLossStopUsd: Number(process.env.V2_LIVE_DAILY_LOSS_STOP_USD ?? "50"),
+    minPrice: Number(process.env.V2_LIVE_MIN_PRICE ?? "0.05"),
+    maxPrice: Number(process.env.V2_LIVE_MAX_PRICE ?? "0.95"),
+  },
+  /** How far past the top of book a live order without its own limit may reach, $/contract. */
+  liveSlippageTolerance: Number(process.env.V2_LIVE_SLIPPAGE ?? "0.02"),
 };
 
 export function requireConfig(keys: ("queueUrl" | "transcriptBucket")[]): void {

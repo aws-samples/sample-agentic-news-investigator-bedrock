@@ -28,11 +28,11 @@ global_settings:
     - path: 'v2/fixtures/live/**'
       reason: 'Recorded live API fixtures, gitignored'
     - path: '.npm/**'
-      reason: 'CI package cache (npm_config_cache in .gitlab-ci.yml); downloaded tarballs, not source'
+      reason: 'CI package cache (npm_config_cache in the CI configuration); downloaded tarballs, not source'
     - path: '.cargo/**'
-      reason: 'CI Cargo home (CARGO_HOME in .gitlab-ci.yml); the registry index and crate sources, not source'
+      reason: 'CI Cargo home (CARGO_HOME in the CI configuration); the registry index and crate sources, not source'
     - path: '.pip/**'
-      reason: 'CI pip cache (PIP_CACHE_DIR in .gitlab-ci.yml); cached PyPI responses, not source'
+      reason: 'CI pip cache (PIP_CACHE_DIR in the CI configuration); cached PyPI responses, not source'
   # Findings on the synthesized stack (infra/cdk.out/*.template.json) that are
   # deliberate design choices for a serverless paper-trading sample. Each entry
   # names the Checkov rule and why the control does not apply here; anything
@@ -72,6 +72,15 @@ global_settings:
     - rule_id: 'GHSA-*-brace-expansion'
       path: 'infra/package-lock.json'
       reason: 'brace-expansion 5.0.9 bundled inside aws-cdk-lib (synth-time glob expansion on repo-authored patterns only); fixed upstream by an aws-cdk-lib release on brace-expansion >= 5.0.12'
+      expiration: '2026-12-31'
+  # Grype: minimatch 10.2.5 is bundled inside the same aws-cdk-lib tarball (it is what
+  # pulls brace-expansion in). Same exposure and the same limit as above: synth-time
+  # only, on globs written in this repository, and a bundled copy cannot be
+  # overridden. Checked 2026-11-15: aws-cdk-lib 2.277.0 still bundles 10.2.x; the
+  # fix is a release bundling minimatch >= 11.0.1.
+    - rule_id: 'GHSA-g3hv-75wg-m249-minimatch'
+      path: 'infra/package-lock.json'
+      reason: 'minimatch 10.2.5 bundled inside aws-cdk-lib (synth-time glob matching on repo-authored patterns only); fixed upstream by an aws-cdk-lib release on minimatch >= 11.0.1'
       expiration: '2026-12-31'
 
 scanners:

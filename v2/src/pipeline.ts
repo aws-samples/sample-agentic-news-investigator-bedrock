@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT-0
+import type { TriageRead } from "./prompts.js";
 import { config } from "./config.js";
 import { investigate } from "./investigate.js";
 import { resolve } from "./quotes/resolver.js";
-import { executeDecision } from "./exec.js";
+import { execute, liveShadowBook } from "./live/route.js";
+import { shadowKalshi } from "./live/shadow.js";
 import { putAudit } from "./audit.js";
 import { addSpend } from "./budget.js";
 import { enqueueScore, entryPrice } from "./score.js";
-import { getPortfolio, listPositions } from "./ledger.js";
+import { getPortfolio, getPosition, listPositions } from "./ledger.js";
+import { addsExposure, exposureAllowance, reviewRefusal } from "./guards.js";
 import { getTheses, recordThesis } from "./thesis.js";
 import {
   savePending,
@@ -20,7 +23,9 @@ import {
 } from "./pending.js";
 import { worldModelFor, renderWorldModel } from "./world.js";
 import { recentActivity } from "./recent.js";
-import { bookUtilization, renderMandate } from "./mandate.js";
+import { bookUtilization, renderMandate, sizingNote, sizingUtilization } from "./mandate.js";
+import { splitDust } from "./dust.js";
+import { universeCheck } from "./universe.js";
 import type { WebSearch } from "./websearch.js";
 import type { NewsItem, TradeDecision } from "./types.js";
 
@@ -29,11 +34,17 @@ import type { NewsItem, TradeDecision } from "./types.js";
  * Prices come from the watcher's last pass (no extra quote calls); the agent
  * resolves live quotes itself when it cares.
  */
-async function buildBookContext(): Promise<string> {
-  const [portfolio, positions] = await Promise.all([getPortfolio(), listPositions()]);
+export async function buildBookContext(): Promise<string> {
+  const [portfolio, allPositions] = await Promise.all([getPortfolio(), listPositions()]);
+  // Dust lines (dust.ts) stay out of the agent's view and the mandate's count; their
+  // total value is still reported so equity reconciles.
+  const { real: positions, dust, dustValueUsd } = splitDust(allPositions);
   const theses = await getTheses(positions.map((p) => p.symbol));
   const book = {
     cash_usd: portfolio?.cash ?? null,
+    ...(dust.length > 0
+      ? { dust_lines: { count: dust.length, value_usd: Math.round(dustValueUsd * 100) / 100, note: `rounding remainders under $${config.dustUsd}; not positions` } }
+      : {}),
     positions: positions.map((p) => ({
       symbol: p.symbol,
       kind: p.kind,
@@ -47,12 +58,35 @@ async function buildBookContext(): Promise<string> {
   // (mandate.ts). Held symbols are excluded from the watchlist: those have
   // standing theses below.
   const held = new Set(positions.map((p) => p.symbol));
+  // Equity from the whole book (dust included, so it reconciles); position count and
+  // deployment from the real positions only.
+  const real = bookUtilization(book);
+  const whole = bookUtilization({
+    cash_usd: book.cash_usd,
+    positions: allPositions.map((p) => ({
+      symbol: p.symbol,
+      qty: p.qty,
+      avg_cost: p.avg_cost,
+      last_seen_price: p.last_watch_price ?? null,
+    })),
+  });
+  const util = sizingUtilization(
+    {
+      ...real,
+      equityUsd: whole.equityUsd,
+      deployedPct: whole.equityUsd !== null && whole.equityUsd > 0 ? real.deployedUsd / whole.equityUsd : null,
+    },
+    config.sizingMultiplier,
+  );
   parts.push(
     renderMandate(
-      bookUtilization(book),
+      util,
       recentActivity.watchlist().filter((w) => !held.has(w.symbol)),
     ),
   );
+  // Only present above 1, so every arm's context is unchanged at the default.
+  const note = sizingNote(whole.equityUsd, book.cash_usd, config.sizingMultiplier);
+  if (note) parts.push(note);
   if (theses.length > 0) {
     parts.push(
       "Standing theses (why each position was opened / last re-underwritten):",
@@ -93,6 +127,14 @@ async function buildBookContext(): Promise<string> {
   return parts.join("\n");
 }
 
+/** v5's universe rule (universe.ts) against the live book: equity and futures gross at the watcher's marks. */
+async function universeGate(symbol: string, side: "buy" | "sell", notionalUsd: number) {
+  const [portfolio, positions] = await Promise.all([getPortfolio(), listPositions()]);
+  const held = positions.map((p) => ({ symbol: p.symbol, qty: p.qty, mark: p.last_watch_price ?? p.avg_cost }));
+  const equityUsd = portfolio?.cash === undefined || portfolio?.cash === null ? null : portfolio.cash + held.reduce((s, h) => s + h.qty * h.mark, 0);
+  return universeCheck({ universe: config.universe, symbol, side, notionalUsd, held, equityUsd, futuresMaxPct: config.futuresMaxPct });
+}
+
 /**
  * The shared post-triage path: investigate -> spend accounting -> decision
  * snapshot + outcome-scoring enqueue -> audit -> (live) execution. Used by the
@@ -103,6 +145,7 @@ export async function investigateAndAct(
   item: NewsItem,
   hypotheses: string[],
   web: WebSearch | null,
+  opts: { triage?: TriageRead } = {},
 ): Promise<TradeDecision[]> {
   const session = web ? web.session(item.headline) : null;
   const search = session ? session.search : null;
@@ -110,7 +153,7 @@ export async function investigateAndAct(
     console.error("[pipeline] book context failed:", e);
     return undefined;
   });
-  const inv = await investigate(item, hypotheses, search, item.id, bookContext);
+  const inv = await investigate(item, hypotheses, search, item.id, bookContext, opts.triage ? { triage: opts.triage } : {});
   // Grounded searches are Bedrock spend too. Folded in here so the budget
   // breaker, the log line and the decision row all see the whole cost of the run.
   inv.costUsd += session?.costUsd ?? 0;
@@ -122,6 +165,10 @@ export async function investigateAndAct(
     `[pipeline] ${item.id}: ${n} action(s) (${inv.numTurns} turns, $${inv.costUsd.toFixed(2)})`,
   );
 
+  // New exposure opened so far by this decision (guards.ts exposureAllowance), and equity at cost
+  // for the cap, read once and only when a cap is set.
+  let newExposureUsd = 0;
+  let equityAtCost: number | null = null;
   for (let i = 0; i < n; i++) {
     const d = inv.decisions[i];
     // Per-action id: order idempotency + independent outcome scoring.
@@ -156,6 +203,9 @@ export async function investigateAndAct(
         confidence: d.confidence,
         trigger: item.source_family,
         rationale: d.rationale,
+        ...(config.fastDesk && d.action !== "hold"
+          ? { fair_probability: d.fair_probability, exit_target: d.exit_target, exit_stop: d.exit_stop, exit_by: d.exit_by }
+          : {}),
       }).catch((e) => console.error("[pipeline] recordThesis failed:", e));
     }
 
@@ -168,15 +218,73 @@ export async function investigateAndAct(
 
     if (d.action === "hold" || config.dryRun) continue;
 
+    // v5: only prediction contracts (and futures up to the cap) execute; the decision is still
+    // audited, thesis-recorded and scored above, so a refused idea is visible, not lost.
+    if (config.universe !== "all") {
+      const gate = await universeGate(d.symbol!, d.action as "buy" | "sell", d.notional_usd ?? 0).catch((e) => ({ ok: false as const, reason: `universe check failed: ${String(e).slice(0, 120)}` }));
+      if (!gate.ok) {
+        await putAudit(item.id, "v2-execution", { action_id: actionId, status: "dropped", reason: gate.reason });
+        console.log(`[pipeline]   dropped ${d.symbol}: ${gate.reason}`);
+        continue;
+      }
+    }
+
+    // Exposure guards (off unless configured): a manage-only daily review, and a per-decision cap
+    // on new exposure. Like the universe gate, a refusal is audited; the decision itself stands.
+    if (config.reviewManageOnly || config.maxNewExposurePct > 0) {
+      const side = d.action as "buy" | "sell";
+      const heldQty = (await getPosition(d.symbol!).catch(() => null))?.qty ?? 0;
+      const refusal = config.reviewManageOnly ? reviewRefusal(item.source_family, side, heldQty) : null;
+      if (refusal) {
+        await putAudit(item.id, "v2-execution", { action_id: actionId, status: "dropped", reason: refusal });
+        console.log(`[pipeline]   dropped ${d.symbol}: ${refusal}`);
+        continue;
+      }
+      if (config.maxNewExposurePct > 0 && addsExposure(side, heldQty)) {
+        if (equityAtCost === null) {
+          const [pf, ps] = await Promise.all([getPortfolio(), listPositions()]);
+          // The cap is a share of the equity the agent sizes against (config.sizingMultiplier, default 1).
+          equityAtCost = ((pf?.cash ?? 0) + ps.reduce((sum, p) => sum + Math.abs(p.qty * p.avg_cost), 0)) * config.sizingMultiplier;
+        }
+        const asked = d.notional_usd ?? 0;
+        const allowed = exposureAllowance(config.maxNewExposurePct, equityAtCost, newExposureUsd, asked);
+        if (allowed < 1) {
+          const reason = `exposure_cap: this decision already opened $${newExposureUsd.toFixed(0)} of the ${config.maxNewExposurePct}% cap`;
+          await putAudit(item.id, "v2-execution", { action_id: actionId, status: "dropped", reason });
+          console.log(`[pipeline]   dropped ${d.symbol}: ${reason}`);
+          continue;
+        }
+        if (allowed < asked) console.log(`[pipeline]   ${d.symbol}: capped $${asked} → $${allowed.toFixed(0)} (exposure_cap ${config.maxNewExposurePct}%)`);
+        d.notional_usd = Math.floor(allowed * 100) / 100;
+        newExposureUsd += d.notional_usd;
+      }
+    }
+
     // A fresh decision on a symbol supersedes any order parked for it.
     await cancelPending(d.symbol!).catch(() => {});
-    const outcome = await executeDecision(
+    const outcome = await execute(
       d as TradeDecision & { action: "buy" | "sell" },
       actionId,
       resolve,
       item.id,
     );
     await putAudit(item.id, "v2-execution", { action_id: actionId, ...outcome });
+    // Shadow mode: what the real Kalshi book would have given this order. Observer only — it
+    // never changes the decision or the fill, and a failure is audited, not thrown.
+    if (config.shadowKalshi) {
+      const shadow = await shadowKalshi(
+        {
+          symbol: d.symbol!,
+          action: d.action as "buy" | "sell",
+          notionalUsd: d.notional_usd ?? 0,
+          limitPrice: d.limit_price,
+          paper: outcome.status === "filled" ? outcome.fill : null,
+          paperStatus: outcome.status === "filled" ? "filled" : outcome.reason,
+        },
+        liveShadowBook,
+      );
+      if (shadow) await putAudit(item.id, "v2-shadow", { action_id: actionId, ...shadow }).catch(() => {});
+    }
     if (outcome.status === "filled") {
       const f = outcome.fill;
       console.log(

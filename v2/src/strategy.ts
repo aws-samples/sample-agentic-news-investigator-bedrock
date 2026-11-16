@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT-0
+import type { TriageRead } from "./prompts.js";
 import { config } from "./config.js";
 import { investigatorSystem } from "./prompts.js";
 import type { NewsItem } from "./types.js";
@@ -35,6 +36,8 @@ export interface StrategyInput {
    * a strategy that can never search would be bench-only.
    */
   search?: ((query: string) => Promise<string>) | null;
+  /** Triage's whole verdict (V2_TRIAGE_HANDOFF), passed to investigate's user message. */
+  triage?: TriageRead;
 }
 
 export interface StrategyResult extends InvestigationResult {
@@ -78,12 +81,16 @@ export interface AgentSdkStrategyOptions {
   systemPrompt?: string;
   maxTurns?: number;
   effort?: string;
+  /** Bedrock model id for this variant's investigations (undefined = config.masterModel). */
+  model?: string;
   /** Rewrites the rendered book context before the agent sees it (e.g. strip the mandate block). */
   transformBookContext?: (ctx: string | undefined) => string | undefined;
   /** Bedrock guardrail for this variant's investigations (undefined = whatever config says). */
   guardrail?: GuardrailRef | null;
   /** Test seam: defaults to the real investigate(), loaded lazily. */
   investigateFn?: InvestigateFn;
+  /** Show the agent triage's whole read (V2_TRIAGE_HANDOFF); default: the config flag. */
+  triageHandoff?: boolean;
 }
 
 function defined<T extends object>(o: T): Partial<T> {
@@ -116,7 +123,9 @@ export function agentSdkStrategy(opts: AgentSdkStrategyOptions = {}): Strategy {
           systemPrompt: opts.systemPrompt,
           maxTurns: opts.maxTurns,
           effort: opts.effort,
+          model: opts.model,
           guardrail: opts.guardrail,
+          triage: (opts.triageHandoff ?? config.triageHandoff) ? input.triage : undefined,
           toolOptions: input.toolOptions as Partial<FinToolOptions> | undefined,
         }),
       );
@@ -215,7 +224,7 @@ function noMandateStrategy(): Strategy {
       "pre-mandate wording (lone hold is first-class, restraint gets credit, choose notional yourself) " +
       "AND the renderMandate() block stripped from the book context. Same tools, turns and effort.",
     systemPrompt: stripMandateFromPrompt(
-      investigatorSystem({ dryRun: config.dryRun, worldModel: config.worldModel }),
+      investigatorSystem({ dryRun: config.dryRun, worldModel: config.worldModel, universe: config.universe, futuresMaxPct: config.futuresMaxPct, fastDesk: config.fastDesk }),
     ),
     transformBookContext: stripMandateFromBookContext,
   });
@@ -233,6 +242,14 @@ export const VARIANTS: Record<string, () => Strategy> = {
       description: "live investigator; events admitted by the yield table as of the window start (V2_YIELD_TRIAGE)",
     }),
   "no-mandate": noMandateStrategy,
+  // V2_TRIAGE_HANDOFF on the bench: same triaged events as `live`, but the agent also sees
+  // triage's materiality, event type, regions, touches_positions and rationale.
+  "triage-handoff": () =>
+    agentSdkStrategy({
+      name: "triage-handoff",
+      description: "live investigator + triage's whole read in the user message (V2_TRIAGE_HANDOFF)",
+      triageHandoff: true,
+    }),
   // Threat model M02 control: the live prompt WITHOUT contentIsDataSection(),
   // i.e. the prompt before 2026-10-01, when only web_search results were data.
   "no-content-rule": () =>
@@ -256,6 +273,21 @@ export const VARIANTS: Record<string, () => Strategy> = {
       maxTurns: 6,
     }),
   guardrail: () => guardrailStrategy(),
+  // Model comparison on identical inputs: the live investigator, one master
+  // model each. Triage is shared by every variant of a run, so both see the same
+  // events; set V2_EFFORT for the run so both investigate at the same depth.
+  fable: () =>
+    agentSdkStrategy({
+      name: "fable",
+      description: "live investigator on Claude Fable 5.1 (us.anthropic.claude-fable-5-1)",
+      model: "us.anthropic.claude-fable-5-1",
+    }),
+  opus: () =>
+    agentSdkStrategy({
+      name: "opus",
+      description: "live investigator on Claude Opus 5.5 (us.anthropic.claude-opus-5-5)",
+      model: "us.anthropic.claude-opus-5-5",
+    }),
 };
 
 /**

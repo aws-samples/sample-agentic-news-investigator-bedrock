@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT-0
 import { PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { yahooBars } from "./quotes/yahoo.js";
+import { alertThresholdPct, dailySigmaPct } from "./guards.js";
 import { config } from "./config.js";
 import { ddb, listPositions, getPortfolio, recordFill, type Position } from "./ledger.js";
 import { resolve } from "./quotes/resolver.js";
@@ -10,10 +12,11 @@ import { liquidationPrice } from "./exec.js";
 import { putAudit } from "./audit.js";
 import { checkBudget, dayKey } from "./budget.js";
 import type { WebSearch } from "./websearch.js";
-import { getTheses } from "./thesis.js";
+import { getTheses, getThesis } from "./thesis.js";
 import { recordResolution } from "./tape.js";
 import type { NewsItem, Quote } from "./types.js";
 import { bookUtilization } from "./mandate.js";
+import { isDust } from "./dust.js";
 
 /**
  * Event-driven selling: price moves ARE events. Every few minutes the watcher
@@ -51,10 +54,14 @@ export function shouldTrigger(opts: {
   nowMs: number;
   /** The live book; when given, a qualifying move on a thin book is reported as `thin` instead of triggering. */
   quote?: { price: number; bid?: number; ask?: number; liquidityUsd?: number };
+  /** The instrument's 20-day daily σ (%), when known: scales the threshold (V2_WATCH_VOL_SIGMA). */
+  dailySigmaPct?: number | null;
 }): { trigger: boolean; movePct: number; thin?: string } {
   const movePct = (opts.price / opts.refPrice - 1) * 100;
   const threshold =
-    opts.kind === "prediction" ? config.watchMovePredictionPct : config.watchMovePct;
+    opts.kind === "prediction"
+      ? config.watchMovePredictionPct
+      : alertThresholdPct(config.watchMovePct, opts.dailySigmaPct ?? null, config.watchVolSigma);
   const cooledDown =
     opts.lastWatchAtMs === null ||
     opts.nowMs - opts.lastWatchAtMs >= config.watchCooldownHours * 3_600_000;
@@ -155,6 +162,57 @@ function alertItem(
   };
 }
 
+/** v6: exit deadlines already put to the agent (symbol|exit_by), so each plan's time stop fires once. */
+const timeStopped = new Set<string>();
+
+/**
+ * Claim a plan's time stop in the table, so it fires once per exit_by across restarts too:
+ * the in-memory set alone re-fired every past deadline on each restart (v6 Iran ceasefire,
+ * 2026-10-25: exit_by 10-23 03:00, re-investigated at the next deploy). False = already fired.
+ * Rows expire with the table's TTL after 30 days.
+ */
+async function claimTimeStop(symbol: string, exitBy: string): Promise<boolean> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: config.table,
+        Item: { pk: `TIMESTOP#${symbol}`, sk: exitBy, fired_at: new Date().toISOString(), ttl: Math.floor(Date.now() / 1000) + 30 * 86_400 },
+        ConditionExpression: "attribute_not_exists(pk)",
+      }),
+    );
+    return true;
+  } catch (e: any) {
+    if (e?.name === "ConditionalCheckFailedException") return false;
+    throw e;
+  }
+}
+
+/** v6: the position's stated exit deadline has passed — re-decide against the plan, not the tape. */
+function timeStopItem(p: Position, plan: { exit_by: string; exit_target?: number; exit_stop?: number; fair_probability?: number; rationale: string }, price: number, quote: Quote): NewsItem {
+  const now = new Date().toISOString();
+  const id = `timestop-${p.symbol}-${Date.now()}`;
+  return {
+    id,
+    source_family: "position-watch",
+    source_id: id,
+    published_at: now,
+    ingested_at: now,
+    headline: `Exit deadline reached: ${p.symbol} (plan said re-decide by ${plan.exit_by}; now ${price} bid)`,
+    summary: JSON.stringify({
+      position: { symbol: p.symbol, kind: p.kind, qty: p.qty, avg_cost: p.avg_cost },
+      book: { bid: quote.bid ?? null, ask: quote.ask ?? null, liquidity_usd: quote.liquidityUsd ?? null },
+      plan: { exit_target: plan.exit_target ?? null, exit_stop: plan.exit_stop ?? null, exit_by: plan.exit_by, fair_probability: plan.fair_probability ?? null },
+      thesis: plan.rationale.slice(0, 600),
+      note:
+        "Internal time stop, not news. The move this position was opened for should have happened by now. " +
+        "Sell unless the thesis has a fresh, specific reason to live — then set a new exit plan.",
+    }),
+    url: "",
+    tickers_hint: [p.symbol],
+    asset_class_hint: null,
+  };
+}
+
 async function settle(p: Position, payout: number): Promise<void> {
   const decisionId = `settle-${p.symbol}-${dayKey()}`;
   const realizedPnl = (payout - p.avg_cost) * p.qty;
@@ -189,9 +247,11 @@ async function settle(p: Position, payout: number): Promise<void> {
 }
 
 async function dailyReview(
-  positions: Position[],
+  allPositions: Position[],
   web: WebSearch | null,
 ): Promise<void> {
+  // The review is of real positions; dust lines (dust.ts) carry no thesis to re-check.
+  const positions = allPositions.filter((p) => !isDust(p));
   const today = dayKey();
   // An empty book is reviewed too: under the mandate it is the case that most
   // needs the slow look (the watchlist is where its first positions come from).
@@ -287,7 +347,7 @@ async function dailyReview(
         "this review is where new positions come from — go through the watchlist and open a " +
         "starter or full position in every candidate that still has a direction, one " +
         "submit_decision per entry, sized by the ladder; for each candidate you pass on, say " +
-        "why its expected move over the next 1–7 days does not clear the spread. Position " +
+        `why its expected move over the next ${config.fastDesk ? "24 hours" : "1–7 days"} does not clear the spread. Position ` +
         "alerts cover intraday moves; this is the slower look.",
     }),
     url: "",
@@ -303,6 +363,23 @@ async function dailyReview(
     ],
     web,
   );
+}
+
+/**
+ * 20-day daily σ for the alert threshold, from Yahoo daily bars; cached per symbol per UTC day.
+ * Equities and futures only (their symbols are Yahoo symbols); anything else, or a fetch that
+ * fails, returns null and keeps the fixed threshold.
+ */
+const sigmaCache = new Map<string, { day: string; sigma: number | null }>();
+async function sigmaFor(symbol: string, kind: string): Promise<number | null> {
+  if (kind !== "equity" && kind !== "futures") return null;
+  const day = new Date().toISOString().slice(0, 10);
+  const hit = sigmaCache.get(symbol);
+  if (hit && hit.day === day) return hit.sigma;
+  const bars = await yahooBars(symbol, { interval: "1d", startMs: Date.now() - 45 * 86_400_000, endMs: Date.now() }).catch(() => []);
+  const sigma = dailySigmaPct(bars.slice(-21).map((b) => b.close));
+  sigmaCache.set(symbol, { day, sigma });
+  return sigma;
 }
 
 export async function watchPass(web: WebSearch | null): Promise<void> {
@@ -323,6 +400,9 @@ export async function watchPass(web: WebSearch | null): Promise<void> {
           continue;
         }
       }
+      // Dust (a rounding remainder worth < config.dustUsd) is not a position: no
+      // re-quote, no alert, no investigation. Settlement above still runs for it.
+      if (isDust(p)) continue;
       const res = await resolve(p.symbol, p.kind as any);
       // Every re-quote goes to the tape (fire-and-forget; the tape never throws).
       recordResolution(res, { origin: "watch" }).catch(() => {});
@@ -331,13 +411,36 @@ export async function watchPass(web: WebSearch | null): Promise<void> {
       // mid. On the $40-deep Texas book the mid flashed +232% and -48% "moves"
       // nobody could transact against, and each one burned an investigation.
       const price = liquidationPrice(res.quote, p.qty);
+      // v6: the exit plan's deadline is a trigger of its own.
+      if (config.fastDesk) {
+        const t = await getThesis(p.symbol).catch(() => null);
+        const by = t?.latest.exit_by;
+        if (by && Date.parse(by) <= Date.now() && !timeStopped.has(`${p.symbol}|${by}`)) {
+          timeStopped.add(`${p.symbol}|${by}`);
+          const budget = await checkBudget({ priority: true });
+          // A table error fails open (fire it): a missed exit costs more than a repeated one.
+          if (budget.allowed && (await claimTimeStop(p.symbol, by).catch(() => true))) {
+            console.log(`[watch] TIME STOP ${p.symbol}: exit_by ${by} passed — investigating`);
+            await investigateAndAct(timeStopItem(p, { ...t!.latest, exit_by: by }, price, res.quote), ["Exit unless the thesis has a fresh reason to live"], web);
+            await markWatched(p.symbol, price);
+            continue;
+          }
+        }
+      }
+      // v6: contract alerts move on the mid, so a widening book is not a "loss" that triggers an
+      // investigation (v5 added to a position on alerts it called "from the spread, not from news").
+      const triggerPrice =
+        config.fastDesk && p.kind === "prediction" && res.quote.bid !== undefined && res.quote.ask !== undefined
+          ? (res.quote.bid + res.quote.ask) / 2
+          : price;
       const { trigger, movePct, thin } = shouldTrigger({
-        price,
+        price: triggerPrice,
         refPrice: p.last_watch_price ?? p.avg_cost,
         kind: p.kind ?? "equity",
         lastWatchAtMs: p.last_watch_at ? Date.parse(p.last_watch_at) : null,
         nowMs: Date.now(),
         quote: res.quote,
+        dailySigmaPct: config.watchVolSigma > 0 && p.kind !== "prediction" ? await sigmaFor(p.symbol, p.kind ?? "equity") : null,
       });
       if (thin) {
         // The letter must still see that the book moved while nobody was asked;
@@ -363,7 +466,7 @@ export async function watchPass(web: WebSearch | null): Promise<void> {
         ["Sell if the thesis is broken or the move has run; hold if it's noise; add only with fresh conviction"],
         web,
       );
-      await markWatched(p.symbol, price);
+      await markWatched(p.symbol, triggerPrice);
     } catch (e) {
       console.error(`[watch] failed on ${p.symbol}:`, e);
     }

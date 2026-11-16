@@ -2,7 +2,7 @@
 import { PutCommand, DeleteCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { config } from "./config.js";
 import { ddb } from "./ledger.js";
-import { executeDecision } from "./exec.js";
+import { execute } from "./live/route.js";
 import { resolve } from "./quotes/resolver.js";
 import { putAudit } from "./audit.js";
 import type { InstrumentKind, TradeDecision } from "./types.js";
@@ -91,6 +91,19 @@ export function remainderAfter(
   };
 }
 
+/**
+ * The ORDER# id a retry fills under. A working remainder keeps the action_id of
+ * the fill that started it, so each slice needs its own id or the ledger's
+ * idempotency put (`attribute_not_exists`) rejects it as a replay of the first —
+ * every later slice failed that way until it expired (v6 RBNZ, 2026-10-22: 40
+ * retries). filled_usd grows by at least MIN_SLICE_USD per slice, so it names
+ * the slice and a replay of the same slice still dedupes.
+ */
+export function pendingOrderId(order: PendingOrder): string {
+  const base = order.action_id ?? order.news_id;
+  return order.reduce_only ? `${base}#f${Math.round((order.filled_usd ?? 0) * 100)}` : base;
+}
+
 export function isExpired(order: PendingOrder, nowMs = Date.now()): boolean {
   return nowMs >= Date.parse(order.expires_at);
 }
@@ -159,9 +172,9 @@ export async function retryPending(): Promise<void> {
       }
       // Pacing between slices of a working exit: the book gets time to replenish.
       if (!sliceDue(order)) continue;
-      const outcome = await executeDecision(
+      const outcome = await execute(
         toDecision(order),
-        order.action_id ?? order.news_id,
+        pendingOrderId(order),
         resolve,
         order.news_id,
       );

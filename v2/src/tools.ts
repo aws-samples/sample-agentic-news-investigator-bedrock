@@ -3,6 +3,7 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { resolve } from "./quotes/resolver.js";
 import { searchMarkets } from "./quotes/prediction.js";
+import { searchKalshi } from "./quotes/kalshi-search.js";
 import * as ledger from "./ledger.js";
 import { getThesis } from "./thesis.js";
 import { config } from "./config.js";
@@ -262,6 +263,21 @@ export function buildFinTools(opts: FinToolOptions): {
           return text(hits);
         },
       ),
+      ...(config.universe === "prediction"
+        ? [
+            tool(
+              "search_kalshi",
+              "Keyword search of Kalshi's open markets (economics, Fed, inflation, jobs, politics, commodities, " +
+                "weather, crypto, companies, world). Returns tradeable symbols (<TICKER>:YES; the NO side is " +
+                "<TICKER>:NO), the event and outcome, yes bid/ask in dollars, 24h volume and close time.",
+              { query: z.string(), limit: z.number().int().min(1).max(15).optional() },
+              async ({ query, limit }) => {
+                if (opts.asOfMs !== undefined) return text({ note: "search_kalshi is live-only; use search_markets in the bench" });
+                return text(await searchKalshi(query, limit ?? 10));
+              },
+            ),
+          ]
+        : []),
       tool(
         "get_portfolio",
         "Paper portfolio snapshot: cash (USD) and realized P&L today.",
@@ -328,6 +344,15 @@ export function buildFinTools(opts: FinToolOptions): {
                 "limit isn't met, the order parks and retries for up to 24h (at-open " +
                 "semantics); set it to bound the gap you're willing to pay.",
             ),
+          // v6 only: the extra fields would change the controls' tool schema, so they are absent there.
+          ...(config.fastDesk
+            ? {
+                fair_probability: z.number().min(0).max(1).optional().describe("Buy/sell: your probability that the side you buy wins (a contract's YES or NO). Sizing follows the edge over the price you pay."),
+                exit_target: z.number().positive().optional().describe("Buy/sell: the price at which you take profit."),
+                exit_stop: z.number().positive().optional().describe("Buy/sell: the price at which the thesis is wrong and you exit."),
+                exit_by: z.string().optional().describe("Buy/sell: ISO time by which the move should have happened; the position is re-checked then."),
+              }
+            : {}),
         },
         async (args) => {
           if (args.action !== "hold" && (!args.symbol || !args.notional_usd)) {
@@ -344,6 +369,14 @@ export function buildFinTools(opts: FinToolOptions): {
             watch_symbol: args.watch_symbol,
             watch_kind: args.watch_kind === "auto" ? undefined : args.watch_kind,
             limit_price: args.limit_price,
+            ...(config.fastDesk
+              ? {
+                  fair_probability: (args as any).fair_probability,
+                  exit_target: (args as any).exit_target,
+                  exit_stop: (args as any).exit_stop,
+                  exit_by: (args as any).exit_by,
+                }
+              : {}),
           });
           return text({
             ok: true,

@@ -35,7 +35,7 @@ To send us a pull request:
 1. Fork the repository.
 2. Modify the source; focus on the specific change you are contributing. If you also
    reformat all the code, it will be hard for us to focus on your change.
-3. Run the same checks CI runs (`.gitlab-ci.yml`): `cargo test --workspace`, and in `v2/`
+3. Run the same checks CI runs (`.github/workflows/ci.yml`): `cargo test --workspace`, and in `v2/`
    `npm run build && npm test`, in `infra/` `npm test && npx cdk synth -c contactEmail=you@example.com`.
    CI also runs ASH, Ferret, detect-secrets and the publication scrub; any finding fails
    the pipeline.

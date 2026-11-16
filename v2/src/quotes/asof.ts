@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT-0
 import type { InstrumentKind, Quote, Resolution } from "../types.js";
+import { predictionAsOf, predictionHistoryEnabled } from "./prediction-history.js";
 import { inferKind, isLiquidFxPair } from "./resolver.js";
 import { splitSide } from "./prediction.js";
 import { intervalForAge, yahooBars, type Bar } from "./yahoo.js";
@@ -235,6 +236,12 @@ export async function resolveAsOf(
     } catch {
       row = null; // a tape outage is not a reason to invent a price; fall through to bars
     }
+  }
+  // Prediction contracts: a tape row more than 10 min old loses to the venue's own minute history
+  // when V2_BENCH_PREDICTION_HISTORY=1 (prediction-history.ts) — the v5 bench.
+  if (k === "prediction" && predictionHistoryEnabled() && (!row || asOfMs - row.asOfMs > 10 * 60_000)) {
+    const h = await predictionAsOf(sym, asOfMs).catch(() => null);
+    if (h) return h;
   }
   const first = intervalForAge(nowMs - asOfMs);
   if (row && asOfMs - row.asOfMs <= SPAN_MS[first]) return fromTape(row, asOfMs);

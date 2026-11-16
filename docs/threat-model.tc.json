@@ -2,7 +2,7 @@
   "schema": 1,
   "applicationInfo": {
     "name": "fin — event-driven agentic paper-trading system",
-    "description": "### What we are working on\n`fin` is a research sample (aws-samples, not production-ready) that turns public financial news into **simulated** trades. Three arms share one EventBridge bus:\n\n- **v1 (control):** serverless Rust pipeline — pollers → Haiku triage → Sonnet analysis → deterministic risk gate → paper execution, all Lambda, ledger in DynamoDB `fin-trading`.\n- **v2 (experiment):** a TypeScript Claude Agent SDK investigator (Fable 5.1 on Bedrock) running on a worker host or container, fed by SQS, with an in-process MCP tool server (quotes, primary sources, web grounding, portfolio, `submit_decision`). Deliberately **no risk gate**; a paper broker's bookkeeping is the only hard limit.\n- **v3:** v2's code plus a gated shared world model and an hourly curiosity loop.\n\n**No real money exists anywhere.** Fills are simulated against live quotes; there is no brokerage integration. The security goals are therefore: protect the AWS account and credentials, bound LLM spend, keep the experiment's records trustworthy, and keep the worker host and the experiment's data private.\n\nMethod: AWS four-question threat model, threats in threat grammar, STRIDE classification, Threat Composer data format. Companion artifacts: `.ash/.ash.yaml` (scanner policy, all scanners PASSED 2026-09-19), Ferret scan (no secrets), `docs/THREAT_MODEL.md` (narrative)."
+    "description": "### What we are working on\n`fin` is a research sample (aws-samples, not production-ready) that turns public financial news into **simulated** trades. Three arms share one EventBridge bus:\n\n- **v1 (control):** serverless Rust pipeline — pollers → Haiku triage → Sonnet analysis → deterministic risk gate → paper execution, all Lambda, ledger in DynamoDB `fin-trading`.\n- **v2 (experiment):** a TypeScript Claude Agent SDK investigator (Fable 5.1 on Bedrock) running on a worker host or container, fed by SQS, with an in-process MCP tool server (quotes, primary sources, web grounding, portfolio, `submit_decision`). Deliberately **no risk gate**; a paper broker's bookkeeping is the only hard limit.\n- **v3:** v2's code plus a gated shared world model and an hourly curiosity loop.\n\n**No real money exists anywhere.** Fills are simulated against live quotes; there is no brokerage integration. The security goals are therefore: protect the AWS account and credentials, bound LLM spend, keep the experiment's records trustworthy, and keep the worker host and the experiment's data private.\n\nMethod: AWS four-question threat model, threats in threat grammar, STRIDE classification, Threat Composer data format. Companion artifacts: `.ash/.ash.yaml` (scanner policy, all scanners PASSED 2026-09-19), Ferret scan (no secrets), `docs/THREAT_MODEL.md` (narrative).\n\n**Opt-in live path (off by default).** `v2/src/live` can route one prediction-desk arm's orders to Kalshi with the operator's own API key (`V2_LIVE=demo|prod`, docs/LIVE_TRADING.md). It is the only code in the repository that can move real money; AS1, AS9, T19–T21 and M28–M31 cover it. Everything else remains paper trading.\n"
   },
   "architecture": {
     "description": "### Components and trust boundaries\n**B1 Internet → ingestion (Lambda, Rust).** Five pollers on EventBridge schedules fetch public feeds (SEC EDGAR Atom, GlobeNewswire, CoinDesk/Cointelegraph, USGS, NHC/GDACS, Fed, ECB). They write `NewsItem` events to the bus `fin-events`, article bodies to S3 `NewsBodies`, and dedupe rows to DynamoDB. Feed content is **untrusted**.\n\n**B2 Bus → v1 stages (Lambda).** triage-agent → analysis-agent (Bedrock Converse, small tool loop) → risk-gate (pure Rust, reads SSM kill switch) → exec-engine (transactional ledger). Each function has its own IAM role with per-resource grants.\n\n**B3 Bus → SQS → v2/v3 worker (any host or container: launchd, systemd, Docker Compose, ECS or EC2).** `fin-v2-news` / `fin-v3-news` queues with DLQs. The worker claims each item (idempotent), enriches 8-Ks by accession, triages with Haiku, checks the SSM daily budget, then runs one bounded Agent SDK `query()`: built-in tools disabled, only the in-process `fin` MCP server. Decisions are executed by a paper broker into `fin-v2-trading` / `fin-v3-trading`; every price observed is written to `fin-quote-tape`; full transcripts go to S3.\n\n**B4 Agent → external data.** Keyless quote APIs (Yahoo, Kraken, Coinbase, CriptoYa, Polymarket, Kalshi); Amazon Nova web grounding via Bedrock (AWS credentials only); `read_source` fetches SEC filings by accession, archived bodies from S3, or the event's own URL (live mode only).\n\n**B5 Observers (read-only).** Dashboard (loopback :4310), daily letter (Bedrock direct client → PDF → CUPS), A/B report. Alerts: CloudWatch alarms → SNS `fin-alerts` → operator email.\n\n**B6 Replay bench.** EventBridge archive → normally-disabled replay rule → `fin-v2-replay` queue → simulated book with as-of quotes. Never touches live tables; refuses live URLs.\n\n### Credentials\nLambdas: per-function IAM roles. Workers, letter and dashboard: the AWS SDK default provider chain (a profile mounted read-only, environment variables, or an ECS task / EC2 instance role); nothing in the repo, compose file or `.env` holds a credential. The stack exports `WorkerPolicyArn`, a least-privilege managed policy holding exactly what those processes need — the two queues, the trading tables and the tape, the transcript bucket, read-only SSM parameters, the bench's archive and replay, and Bedrock invoke on the named models and Nova grounding — with no IAM actions and no SSM writes. Adopters attach it to the worker identity and nothing broader (`ops/README.md`)."
@@ -15,7 +15,7 @@
       "id": "bb6fe17b-c501-5d05-989f-5cb12e398cde",
       "numericId": 1,
       "displayOrder": 1,
-      "content": "No brokerage is connected anywhere. Fills are simulated against live quotes, so a wrong decision cannot cause financial loss; the harm ceiling for decision-integrity threats is a corrupted experiment record.",
+      "content": "With `V2_LIVE` off (the code default and every shipped template) no brokerage is connected anywhere. Fills are simulated against live quotes, so a wrong decision cannot cause financial loss; the harm ceiling for decision-integrity threats is a corrupted experiment record. The opt-in live path (`v2/src/live`, docs/LIVE_TRADING.md) connects one arm to Kalshi with the operator's own API key. For that arm this assumption does not hold: T19, T20 and T21 apply and every decision-integrity threat above can cost real money up to the live limits (M29).",
       "tags": [
         "AS1"
       ]
@@ -81,6 +81,15 @@
       "content": "The replay bench is isolated by construction: separate archive, rule and queue, a simulated book, as-of quotes, and refusal of live URLs. It never writes to live tables or the quote tape.",
       "tags": [
         "AS8"
+      ]
+    },
+    {
+      "id": "a69a0b8e-6fb1-539b-a8ca-0f521ac46144",
+      "numericId": 9,
+      "displayOrder": 9,
+      "content": "The live path is enabled only deliberately: by an operator who holds the venue's permission for this use, in an AWS account they own and pay for, on an arm dedicated to it and seeded with the real balance. It is never enabled on a shared or paper arm.",
+      "tags": [
+        "AS9"
       ]
     }
   ],
@@ -289,7 +298,7 @@
       "id": "987febb1-2b15-5514-b466-ea0c67866619",
       "numericId": 21,
       "displayOrder": 21,
-      "content": "CI on the published repository: `.gitlab-ci.yml` (GitLab, where the repository lives; green since 2026-10-01) and `.github/workflows/ci.yml` (the same gates for a GitHub mirror, every Action pinned to a full commit SHA). Every image pinned by digest from ECR Public and every tool install pinned (ASH by commit, Ferret 1.10.0, detect-secrets 1.5.0, cargo-audit 0.22.2; in GitLab's ASH local mode Syft, Grype and Opengrep by checksum, cfn-nag from ASH's Gemfile.lock, Bandit, Checkov and Semgrep at exact versions in `.ash/.ash.yaml`). Jobs: Rust tests and cargo audit, v2 typecheck/tests/npm audit, infra tests and cdk-nag through `cdk synth`, ASH on the synthesized stack (fails on findings and on any scanner that could not run), Ferret (fails on any unsuppressed high/medium hit), detect-secrets, the scrub, SPDX and `.env.example` checks, and the threat-model render check. GitLab's shared runners allow no privileged containers, so ASH runs in local mode there (`scripts/ci/ash-local.sh`) rather than container mode.",
+      "content": "CI on the published repository: `.github/workflows/ci.yml` (green since 2026-10-01; every Action pinned to a full commit SHA). Every image pinned by digest from ECR Public and every tool install pinned (ASH by commit, Ferret 1.10.0, detect-secrets 1.5.0, cargo-audit 0.22.2; in ASH local mode Syft, Grype and Opengrep by checksum, cfn-nag from ASH's Gemfile.lock, Bandit, Checkov and Semgrep at exact versions in `.ash/.ash.yaml`). Jobs: Rust tests and cargo audit, v2 typecheck/tests/npm audit, infra tests and cdk-nag through `cdk synth`, ASH on the synthesized stack (fails on findings and on any scanner that could not run), Ferret (fails on any unsuppressed high/medium hit), detect-secrets, the scrub, SPDX and `.env.example` checks, and the threat-model render check. Runners without privileged containers run ASH in local mode (`scripts/ci/ash-local.sh`) rather than container mode.",
       "status": "mitigationResolved",
       "tags": [
         "M21"
@@ -353,6 +362,46 @@
       "status": "mitigationResolved",
       "tags": [
         "M27"
+      ]
+    },
+    {
+      "id": "83d1cb1c-b431-5e7a-bb81-ba46a50dfb7b",
+      "numericId": 28,
+      "displayOrder": 28,
+      "content": "Live trading is off by default and fails closed. `V2_LIVE` is `off` unless set to `demo` or `prod`, and no shipped template sets it; with it off `live/route.ts execute()` is exactly the paper `executeDecision`. When on, every order first reads a dedicated SSM kill switch (`V2_LIVE_KILL_SWITCH_PARAM`) and proceeds only if it is exactly `false` — a missing, unreadable or any other value halts the arm — and Kalshi must be in `V2_ENABLE_SOURCES` or no call is made. Only Kalshi contracts are routed; every other venue is refused. `live/cli.ts test-order` refuses anything but the demo exchange.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M28"
+      ]
+    },
+    {
+      "id": "e0c5be4e-5959-5db5-8765-acf048b8e297",
+      "numericId": 29,
+      "displayOrder": 29,
+      "content": "Hard limits in real dollars on the live arm (`live/limits.ts`, pure and unit-tested; `live/broker.ts`): a maximum order, a maximum cost basis per contract, a maximum total deployment, a daily loss stop on equity at cost, and a buy price band (defaults sized for a first account of about $500). Sizing uses the balance and positions read from the exchange on that order, not the ledger. Orders are immediate-or-cancel with a limit that never loosens; exits are `reduce_only` and are never blocked by a limit; buying one side of a market while the other is held is refused; a deterministic `client_order_id` makes a retry idempotent. The limits bound size and a day's realized loss. They do not judge the trade.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M29"
+      ]
+    },
+    {
+      "id": "6bc066b0-6de3-5133-a22a-b80a89a8f707",
+      "numericId": 30,
+      "displayOrder": 30,
+      "content": "Exchange key custody is the operator's. The code reads the key from `V2_KALSHI_KEY_PATH` or `V2_KALSHI_KEY_PEM`, signs requests in process, and never logs or stores it. docs/LIVE_TRADING.md asks for a key file readable only by the worker's user, a key that is never committed or baked into an image, separate demo and production keys, and rotation on any suspicion. There is no secrets-manager integration and no exchange-side limit configured by this sample.",
+      "status": "mitigationIdentified",
+      "tags": [
+        "M30"
+      ]
+    },
+    {
+      "id": "4b758104-56c8-5553-820a-dc87e8b54fd7",
+      "numericId": 31,
+      "displayOrder": 31,
+      "content": "Live fills are recorded from the exchange's response, fee included, into the same atomic ledger transaction and `v2-execution` audit row as a paper fill, so every real order is attributable to the decision, transcript and news item that caused it (M05). `reconcilePass` (worker, every 15 minutes while live) diffs ledger positions against exchange positions and writes any difference to a `v2-live-reconcile` audit row and the log. `V2_SHADOW_KALSHI` lets a paper arm record what real books would have filled before any money is involved.",
+      "status": "mitigationResolved",
+      "tags": [
+        "M31"
       ]
     }
   ],
@@ -764,7 +813,7 @@
         },
         {
           "key": "Comments",
-          "value": "Lockfiles plus ASH (Grype, Syft, npm audit), cargo audit and npm audit gate every push (M21). 2026-09-19 removed nine advisories; 2026-09-30 replaced cargo-lambda-cdk (bundled js-toml/lodash-es) with a local construct and updated fast-uri/ip-address; brace-expansion bundled inside aws-cdk-lib is suppressed until 2026-12-31 (synth-time only, fix is upstream). 2026-10-01, from the first GitLab CI runs: h2 0.4.19, rustls 0.23.45 and rust_decimal 1.43.0 (drops rkyv 0.7), hono 4.13.9 through an npm override, and `min-release-age=7` in both `.npmrc` files so a freshly published version is not resolved. The Agent SDK bundles a Claude Code runtime, a trust placed in Anthropic's package."
+          "value": "Lockfiles plus ASH (Grype, Syft, npm audit), cargo audit and npm audit gate every push (M21). 2026-09-19 removed nine advisories; 2026-09-30 replaced cargo-lambda-cdk (bundled js-toml/lodash-es) with a local construct and updated fast-uri/ip-address; brace-expansion bundled inside aws-cdk-lib is suppressed until 2026-12-31 (synth-time only, fix is upstream). 2026-10-01, from the first CI runs: h2 0.4.19, rustls 0.23.45 and rust_decimal 1.43.0 (drops rkyv 0.7), hono 4.13.9 through an npm override, and `min-release-age=7` in both `.npmrc` files so a freshly published version is not resolved. The Agent SDK bundles a Claude Code runtime, a trust placed in Anthropic's package."
         }
       ],
       "status": "threatIdentified",
@@ -1027,6 +1076,122 @@
       "tags": [
         "T18"
       ]
+    },
+    {
+      "id": "08d71eff-a6f8-5fee-8ac3-94610c06a008",
+      "numericId": 19,
+      "displayOrder": 19,
+      "threatSource": "internet-based actor",
+      "prerequisites": "who can place content in a public feed, a filing, a web page or a prediction-market title the live arm reads, while `V2_LIVE` is on",
+      "threatAction": "steer the investigator, by injected instructions or by plausible false content, into buying contracts the evidence does not support",
+      "threatImpact": "real orders on Kalshi and the loss of the money staked on them",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "the operator's exchange account balance",
+        "live ledger and audit trail"
+      ],
+      "statement": "An internet-based actor who can place content in a public feed, a filing, a web page or a prediction-market title the live arm reads, while `V2_LIVE` is on can steer the investigator, by injected instructions or by plausible false content, into buying contracts the evidence does not support, which leads to real orders on Kalshi and the loss of the money staked on them, resulting in reduced integrity of the operator's exchange account balance, live ledger and audit trail.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "Comments",
+          "value": "Applies only with V2_LIVE=demo|prod. Residual by design: the live arm keeps the investigator's unassisted judgment, so a persuasive injection can still move a position. M02 and M27 reduce the likelihood; M29 bounds the loss per order, per contract, in total and per day; M28 lets the operator stop it. The loss ceiling is the live limits the operator sets, and with V2_SIZING_MULTIPLIER above 1 the agent asks for proportionally more inside them."
+        }
+      ],
+      "status": "threatIdentified",
+      "tags": [
+        "T19"
+      ]
+    },
+    {
+      "id": "a180e3d4-e7a5-592d-b700-715c0418cb30",
+      "numericId": 20,
+      "displayOrder": 20,
+      "threatSource": "actor",
+      "prerequisites": "with read access to the worker host, its environment, its process list or a backup of them",
+      "threatAction": "read the Kalshi API private key (`V2_KALSHI_KEY_PATH` or `V2_KALSHI_KEY_PEM`)",
+      "threatImpact": "orders placed on the operator's exchange account outside this system and outside its limits",
+      "impactedGoal": [
+        "confidentiality",
+        "integrity"
+      ],
+      "impactedAssets": [
+        "Kalshi API key",
+        "the operator's exchange account balance"
+      ],
+      "statement": "An actor with read access to the worker host, its environment, its process list or a backup of them can read the Kalshi API private key (`V2_KALSHI_KEY_PATH` or `V2_KALSHI_KEY_PEM`), which leads to orders placed on the operator's exchange account outside this system and outside its limits, resulting in reduced confidentiality and integrity of Kalshi API key, the operator's exchange account balance.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "I",
+            "S",
+            "E"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "High"
+        },
+        {
+          "key": "Comments",
+          "value": "Applies only when a key is configured. The code never logs the key and never writes it anywhere, but it does not manage it either: custody is the operator's (M30). The limits in M29 do not bind an actor who holds the key, because they are enforced by this code, not by the exchange."
+        }
+      ],
+      "status": "threatIdentified",
+      "tags": [
+        "T20"
+      ]
+    },
+    {
+      "id": "b38d4521-4f79-551a-8de8-a67945fb651d",
+      "numericId": 21,
+      "displayOrder": 21,
+      "threatSource": "defect or outage in the live path",
+      "prerequisites": "(a wrong assumption about the exchange API, a partial fill recorded wrongly, a retry after a timeout, a settlement the ledger books differently)",
+      "threatAction": "leave the arm's ledger and the exchange account disagreeing about positions or cash",
+      "threatImpact": "orders sized against a book that is not the real one, or losses the ledger does not show",
+      "impactedGoal": [
+        "integrity"
+      ],
+      "impactedAssets": [
+        "live ledger and audit trail",
+        "the operator's exchange account balance"
+      ],
+      "statement": "A defect or outage in the live path (a wrong assumption about the exchange API, a partial fill recorded wrongly, a retry after a timeout, a settlement the ledger books differently) can leave the arm's ledger and the exchange account disagreeing about positions or cash, which leads to orders sized against a book that is not the real one, or losses the ledger does not show, resulting in reduced integrity of live ledger and audit trail, the operator's exchange account balance.",
+      "metadata": [
+        {
+          "key": "STRIDE",
+          "value": [
+            "T",
+            "R"
+          ]
+        },
+        {
+          "key": "Priority",
+          "value": "Medium"
+        },
+        {
+          "key": "Comments",
+          "value": "Sizing reads balance and positions from the exchange on every order, so a stale ledger cannot oversize a buy (M29); a deterministic client_order_id makes a retried order idempotent; the reconcile pass reports any difference every 15 minutes (M31). Nothing is repaired automatically. One assumption is confirmed only on the demo exchange: that average_fill_price is quoted on the YES book."
+        }
+      ],
+      "status": "threatIdentified",
+      "tags": [
+        "T21"
+      ]
     }
   ],
   "mitigationLinks": [
@@ -1253,6 +1418,46 @@
     {
       "mitigationId": "f7c7d38e-ed9c-5e6d-8785-c6715c8aaa87",
       "linkedId": "a3d32b15-9277-5cd0-96fd-628d11e1790e"
+    },
+    {
+      "mitigationId": "4627b223-94f0-5b46-bb14-cc3972639901",
+      "linkedId": "08d71eff-a6f8-5fee-8ac3-94610c06a008"
+    },
+    {
+      "mitigationId": "f7c7d38e-ed9c-5e6d-8785-c6715c8aaa87",
+      "linkedId": "08d71eff-a6f8-5fee-8ac3-94610c06a008"
+    },
+    {
+      "mitigationId": "83d1cb1c-b431-5e7a-bb81-ba46a50dfb7b",
+      "linkedId": "08d71eff-a6f8-5fee-8ac3-94610c06a008"
+    },
+    {
+      "mitigationId": "e0c5be4e-5959-5db5-8765-acf048b8e297",
+      "linkedId": "08d71eff-a6f8-5fee-8ac3-94610c06a008"
+    },
+    {
+      "mitigationId": "4b758104-56c8-5553-820a-dc87e8b54fd7",
+      "linkedId": "08d71eff-a6f8-5fee-8ac3-94610c06a008"
+    },
+    {
+      "mitigationId": "6bc066b0-6de3-5133-a22a-b80a89a8f707",
+      "linkedId": "a180e3d4-e7a5-592d-b700-715c0418cb30"
+    },
+    {
+      "mitigationId": "83d1cb1c-b431-5e7a-bb81-ba46a50dfb7b",
+      "linkedId": "a180e3d4-e7a5-592d-b700-715c0418cb30"
+    },
+    {
+      "mitigationId": "e0c5be4e-5959-5db5-8765-acf048b8e297",
+      "linkedId": "b38d4521-4f79-551a-8de8-a67945fb651d"
+    },
+    {
+      "mitigationId": "4b758104-56c8-5553-820a-dc87e8b54fd7",
+      "linkedId": "b38d4521-4f79-551a-8de8-a67945fb651d"
+    },
+    {
+      "mitigationId": "28ce533b-b6cf-57cb-955f-4d09c2218d44",
+      "linkedId": "b38d4521-4f79-551a-8de8-a67945fb651d"
     }
   ],
   "assumptionLinks": [
@@ -1345,6 +1550,21 @@
       "type": "Threat",
       "assumptionId": "c071d206-2f1f-5228-8555-0dc2f183d45b",
       "linkedId": "a3d32b15-9277-5cd0-96fd-628d11e1790e"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "a69a0b8e-6fb1-539b-a8ca-0f521ac46144",
+      "linkedId": "08d71eff-a6f8-5fee-8ac3-94610c06a008"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "a69a0b8e-6fb1-539b-a8ca-0f521ac46144",
+      "linkedId": "a180e3d4-e7a5-592d-b700-715c0418cb30"
+    },
+    {
+      "type": "Threat",
+      "assumptionId": "a69a0b8e-6fb1-539b-a8ca-0f521ac46144",
+      "linkedId": "b38d4521-4f79-551a-8de8-a67945fb651d"
     }
   ]
 }

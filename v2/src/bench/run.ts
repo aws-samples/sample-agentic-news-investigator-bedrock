@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT-0
 import { config } from "../config.js";
+import { universeCheck } from "../universe.js";
 import { HORIZONS } from "../score.js";
 import { SimBook, type SimOutcome } from "./book.js";
 import { fillPrice } from "../exec.js";
@@ -35,6 +36,9 @@ export interface BenchEvent {
   /** Triage event type and held-symbol flag, for variants that apply their own admission rule. */
   eventType?: string;
   touchesPositions?: boolean;
+  /** Triage's regions and rationale, for V2_TRIAGE_HANDOFF. */
+  regions?: string[];
+  rationale?: string;
 }
 
 export interface BenchRow {
@@ -460,6 +464,8 @@ export async function runVariant(
       bench: true,
       transcriptId: `bench/${opts.benchName}/${strategy.name}/${ev.item.id}`,
       toolOptions: { asOfMs: atMs, book: view },
+      // Always offered; a strategy uses it only with triageHandoff (or V2_TRIAGE_HANDOFF).
+      triage: { materiality: ev.materiality, event_type: ev.eventType ?? "other", regions: ev.regions ?? [], touches_positions: ev.touchesPositions ?? false, rationale: ev.rationale ?? "" },
     });
     spent += res.costUsd;
     row.cost_usd = res.costUsd;
@@ -518,6 +524,17 @@ export async function runVariant(
         if (d === primary) primaryOutcome = { fill: null, dropped: "unresolvable" };
       } else {
         const order = d as TradeDecision & { action: "buy" | "sell" };
+        // v5's universe rule (universe.ts), as the live pipeline applies it.
+        if (config.universe !== "all") {
+          const snap = book.snapshot();
+          const held = snap.positions.map((p) => ({ symbol: p.symbol, qty: p.qty, mark: p.last_seen_price ?? p.avg_cost }));
+          const gate = universeCheck({ universe: config.universe, symbol: order.symbol!, side: order.action, notionalUsd: order.notional_usd ?? 0, held, equityUsd: book.equity(), futuresMaxPct: config.futuresMaxPct });
+          if (!gate.ok) {
+            outcomes.push({ action_id: actionId, action: order.action, symbol: order.symbol, outcome: { status: "dropped", reason: gate.reason } });
+            if (d === primary) primaryOutcome = { fill: null, dropped: "universe" };
+            continue;
+          }
+        }
         // A fresh decision on a symbol supersedes any order parked for it (live: cancelPending).
         for (let j = pending.length - 1; j >= 0; j--) if (pending[j].d.symbol === order.symbol) pending.splice(j, 1);
         let o: SimOutcome | { status: "parked"; reason: string; fill_at: string } = book.apply(

@@ -44,7 +44,7 @@ RUN npm run compile \
 # The runtime user is written straight into /etc/passwd - uid 65532, HOME
 # /home/nonroot, the same as distroless's `nonroot` - so no shadow-utils.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
-ARG NODE_RPM=nodejs24-24.21.0
+ARG NODE_RPM=nodejs24-24.22.3
 RUN dnf -y upgrade \
  && dnf -y install "$NODE_RPM" \
  && dnf clean all \

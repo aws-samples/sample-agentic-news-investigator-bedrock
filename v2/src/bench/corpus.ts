@@ -328,7 +328,8 @@ export function selectEvents(items: NewsItem[], opts: SelectOptions = {}): NewsI
 /** A triaged corpus item as the runner's BenchEvent. `passed` is the threshold under test, not the live one. */
 export function toBenchEvent(
   item: NewsItem,
-  verdict: Pick<TriageVerdict, "materiality" | "hypotheses"> & Partial<Pick<TriageVerdict, "event_type" | "touches_positions">>,
+  verdict: Pick<TriageVerdict, "materiality" | "hypotheses"> &
+    Partial<Pick<TriageVerdict, "event_type" | "touches_positions" | "regions" | "rationale">>,
   threshold: number,
 ): BenchEvent {
   const materiality = Number.isFinite(verdict.materiality) ? verdict.materiality : 0;
@@ -340,6 +341,9 @@ export function toBenchEvent(
     // For variants with their own admission rule (yield-triage).
     eventType: verdict.event_type,
     touchesPositions: verdict.touches_positions,
+    // Triage's regions and rationale, for V2_TRIAGE_HANDOFF.
+    regions: verdict.regions,
+    rationale: verdict.rationale,
   };
 }
 

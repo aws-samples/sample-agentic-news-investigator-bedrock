@@ -3,6 +3,8 @@ import type { Quote, Resolution, TradeDecision } from "./types.js";
 import { config } from "./config.js";
 import * as ledger from "./ledger.js";
 import { applyFill, bookEquity, shortExposure, shortCollateralOk, clampReduceOnly } from "./positions.js";
+import { snapExitQty } from "./dust.js";
+import { kalshiFee, parseKalshiSymbol } from "./live/kalshi-core.js";
 
 const MIN_SLIPPAGE = 0.0002; // 2 bps adverse when there's no book
 
@@ -43,6 +45,23 @@ export function fillPrice(quote: Quote, side: "buy" | "sell"): FillCalc | null {
   }
   const slippageBps = ((price - quote.price) / quote.price) * 1e4 * (side === "buy" ? 1 : -1);
   return { fillPrice: price, slippageBps };
+}
+
+/** Sell qty for a kind that cannot be shorted: capped at what is held (an exit), else unchanged. Pure. */
+export function exitQtyForUnshortable(kind: string, side: "buy" | "sell", heldQty: number, qty: number): number {
+  if (side !== "sell" || SHORTABLE_KINDS.has(kind) || !(heldQty > 0)) return qty;
+  return Math.min(qty, heldQty);
+}
+
+/**
+ * A paper fill on a Kalshi contract with Kalshi's taker fee folded into the price (buys pay more,
+ * sells net less); any other quote unchanged. Pure, for V2_KALSHI_FEES=1 (config.ts).
+ */
+export function withKalshiFee(calc: FillCalc, quote: Quote, qty: number, side: "buy" | "sell"): FillCalc {
+  if (quote.kind !== "prediction" || (quote.source !== "kalshi" && !parseKalshiSymbol(quote.symbol)) || !(qty > 0)) return calc;
+  const perContract = kalshiFee(qty, calc.fillPrice) / qty;
+  const p = round8(side === "buy" ? calc.fillPrice + perContract : calc.fillPrice - perContract);
+  return { fillPrice: p, slippageBps: ((p - quote.price) / quote.price) * 1e4 * (side === "buy" ? 1 : -1) };
 }
 
 export function round8(x: number): number {
@@ -100,7 +119,7 @@ export async function executeDecision(
       detail: `${quote.symbol}: quote is ${meta.ageSecs}s old (max ${config.maxQuoteAgeSecs}s)`,
     };
   }
-  const calc = fillPrice(quote, decision.action);
+  let calc = fillPrice(quote, decision.action);
   if (!calc) {
     return {
       status: "dropped",
@@ -172,6 +191,26 @@ export async function executeDecision(
     const r = clampReduceOnly(decision.action, oldQty, qty, quote.symbol);
     if (!r.ok) return { status: "dropped", reason: r.reason, detail: r.detail };
     qty = r.qty;
+    notional = round8(qty * calc.fillPrice);
+  }
+  // A sell of something that cannot be shorted (a contract, a long-only venue) that asks for more
+  // than is held is an exit: close the position. The agent sizes exits in dollars, often at cost;
+  // after a crash that is several times the position at today's price, and refusing it as a
+  // "short" left v6 holding two collapsed Senate contracts on 2026-11-04 (stops at 0.095 and
+  // 0.11 dropped as not_shortable; one settled at 0, the other was sold 2.5 h later at 0.081).
+  qty = exitQtyForUnshortable(quote.kind, decision.action, oldQty, qty);
+  notional = round8(qty * calc.fillPrice);
+  // An exit that would leave a remainder (or a sliver of an opposite position) worth
+  // less than config.dustUsd closes the position exactly instead (dust.ts).
+  const snapped = snapExitQty({ action: decision.action as "buy" | "sell", oldQty, qty, fillPrice: calc.fillPrice });
+  if (snapped !== qty) {
+    qty = snapped;
+    notional = round8(qty * calc.fillPrice);
+  }
+  // Kalshi's taker fee (V2_KALSHI_FEES=1), folded into the price the way a real fill nets it:
+  // 0.07 × C × P × (1 − P), rounded up per order. Paper charged no fee before 2026-10-30.
+  if (config.kalshiFees) {
+    calc = withKalshiFee(calc, quote, qty, decision.action);
     notional = round8(qty * calc.fillPrice);
   }
 

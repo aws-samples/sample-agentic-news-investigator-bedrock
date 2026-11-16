@@ -201,6 +201,15 @@ export async function checkResolution(symbol: string): Promise<ResolutionStatus>
   return { resolved: false };
 }
 
+/** Pure: did this Polymarket market exist and trade at asOfMs (created before, not yet closed/ended)? */
+export function marketOpenAt(m: { createdAt?: string; startDate?: string; closedTime?: string | null; endDate?: string }, asOfMs: number): boolean {
+  const born = Date.parse(m.createdAt ?? m.startDate ?? "");
+  if (!Number.isFinite(born) || born > asOfMs) return false;
+  // closedTime comes as "2026-04-01 10:06:59+00"; endDate as ISO.
+  const end = Date.parse((m.closedTime ?? "").replace(" ", "T").replace(/\+00$/, "Z")) || Date.parse(m.endDate ?? "");
+  return !Number.isFinite(end) || end > asOfMs;
+}
+
 export interface MarketHit {
   symbol: string;
   venue: string;
@@ -214,11 +223,14 @@ export interface MarketHit {
  * Free-text discovery via Polymarket public-search (Kalshi has no public
  * search endpoint — probed 404 2026-08-01; Kalshi symbols quote directly).
  */
-export async function searchMarkets(query: string, limit = 8): Promise<MarketHit[]> {
+export async function searchMarkets(query: string, limit = 8, opts: { asOfMs?: number } = {}): Promise<MarketHit[]> {
   if (!sourceEnabled("polymarket")) return [];
+  // asOfMs (bench): include markets closed since, keep those that existed and were open then,
+  // and drop prices — today's price for a past event is lookahead.
+  const asOf = opts.asOfMs;
   const url = `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(
     query,
-  )}&limit_per_type=${Math.min(Math.max(limit, 1), 10)}`;
+  )}&limit_per_type=${Math.min(Math.max(limit, 1), 10)}${asOf !== undefined ? "&keep_closed_markets=1" : ""}`;
   const hits: MarketHit[] = [];
   try {
     const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
@@ -226,8 +238,10 @@ export async function searchMarkets(query: string, limit = 8): Promise<MarketHit
     const body: any = await resp.json();
     for (const ev of body?.events ?? []) {
       for (const m of ev?.markets ?? []) {
-        if (m?.closed) continue;
         if (typeof m?.slug !== "string") continue;
+        if (asOf === undefined) {
+          if (m?.closed) continue;
+        } else if (!marketOpenAt(m, asOf)) continue;
         let yesPrice: string | undefined;
         if (typeof m.outcomePrices === "string") {
           try {
@@ -240,7 +254,7 @@ export async function searchMarkets(query: string, limit = 8): Promise<MarketHit
           symbol: `${m.slug}:YES`,
           venue: "polymarket",
           question: typeof m.question === "string" ? m.question : m.slug,
-          yes_price: yesPrice,
+          yes_price: asOf === undefined ? yesPrice : undefined,
           volume: typeof m.volume === "string" ? m.volume : undefined,
           close_time: typeof m.endDate === "string" ? m.endDate : undefined,
         });

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT-0
 # Fails when tracked text still carries operator specifics that must not reach
-# the public repository: internal auth tooling, personal identifiers, the
-# private account id, macOS service-manager and log paths, local absolute paths.
+# the public repository: environment-specific names and identifiers, macOS
+# service-manager and log paths, local absolute paths.
 #
 #   scripts/oss/scrub-check.sh [dir]     # dir defaults to the repository root
 #
@@ -23,14 +23,21 @@ main() {
     --include='*.example' --include='Dockerfile' --include='*.service' --include='*.plist*'
   )
 
-  # Matched case-insensitively ("Midway" once slipped past a case-sensitive
-  # check), except the credential tool `ada` (collides with the ADA ticker) and
-  # `homebrew` (HOMEBREW_PREFIX is a documented, portable fallback).
-  # Terms specific to one maintainer (alias, account id, local tool names) are not
-  # kept in this file: pass them as an extended regex in SCRUB_EXTRA_PATTERN.
-  pattern='midway|mwinit|amazon\.com|launchctl|Library/Logs|isengard|/Users/|aws\.dev|a2z\.com|\bOSSM\b|\bPCSR\b'
+  # Generic checks only. Terms specific to the maintainer's environment are never
+  # kept in this file: they come from SCRUB_EXTRA_PATTERN (case-insensitive) and
+  # SCRUB_EXTRA_PATTERN_CS (case-sensitive) extended regexes, or from
+  # scripts/oss/private-scrub.pattern and private-scrub-cs.pattern when those
+  # private files exist (they are never exported). `homebrew` is case-sensitive
+  # because HOMEBREW_PREFIX is a documented, portable fallback.
+  local here
+  here="$(cd "$(dirname "$0")" && pwd)"
+  load_private() { [ -f "$here/$1" ] && grep -v '^#' "$here/$1" | tr -d '\n'; }
+  : "${SCRUB_EXTRA_PATTERN:=$(load_private private-scrub.pattern)}"
+  : "${SCRUB_EXTRA_PATTERN_CS:=$(load_private private-scrub-cs.pattern)}"
+  pattern='amazon\.com|launchctl|Library/Logs|/Users/'
   if [ -n "${SCRUB_EXTRA_PATTERN:-}" ]; then pattern="$pattern|$SCRUB_EXTRA_PATTERN"; fi
-  local pattern_cs='\bada\b|homebrew'
+  local pattern_cs='homebrew'
+  if [ -n "${SCRUB_EXTRA_PATTERN_CS:-}" ]; then pattern_cs="$pattern_cs|$SCRUB_EXTRA_PATTERN_CS"; fi
 
   # Paths are made relative to the target before filtering so that the
   # checkout's own location (which may itself contain excluded names) cannot

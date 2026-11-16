@@ -17,6 +17,11 @@ export interface ThesisEntry {
   confidence: number;
   trigger: string; // source_family of the triggering event
   rationale: string;
+  /** v6 only: the decision's exit plan and stated probability. */
+  fair_probability?: number;
+  exit_target?: number;
+  exit_stop?: number;
+  exit_by?: string;
 }
 
 export interface Thesis {
@@ -28,6 +33,17 @@ export interface Thesis {
 const LATEST_RATIONALE_MAX = 600;
 const HISTORY_RATIONALE_MAX = 200;
 const HISTORY_MAX = 8;
+
+/** Pure: a hold entry that inherits the previous entry's exit plan and stated probability. */
+export function carryExitPlan(entry: ThesisEntry, prev: ThesisEntry): ThesisEntry {
+  return {
+    ...entry,
+    fair_probability: prev.fair_probability,
+    exit_target: prev.exit_target,
+    exit_stop: prev.exit_stop,
+    exit_by: prev.exit_by,
+  };
+}
 
 export function compactEntry(e: ThesisEntry, maxRationale: number): ThesisEntry {
   return { ...e, rationale: e.rationale.slice(0, maxRationale) };
@@ -47,6 +63,11 @@ export async function getTheses(symbols: string[]): Promise<Thesis[]> {
 
 export async function recordThesis(symbol: string, entry: ThesisEntry): Promise<void> {
   const existing = await getThesis(symbol);
+  // v6: a hold that re-underwrites a position keeps the exit plan of the trade that opened it;
+  // without this every re-check erased exit_by and the time stop never fired (2026-10-22).
+  if (entry.action === "hold" && entry.exit_by === undefined && existing?.latest.exit_by !== undefined) {
+    entry = carryExitPlan(entry, existing.latest);
+  }
   const history = existing
     ? [compactEntry(existing.latest, HISTORY_RATIONALE_MAX), ...existing.history].slice(
         0,

@@ -4,7 +4,7 @@ import { agentRunIntervened, blockedSide, customHeadersEnv, type GuardrailRef } 
 import { activeGuardrail } from "./guardrail-runtime.js";
 import { config } from "./config.js";
 import { buildFinTools, type FinToolOptions } from "./tools.js";
-import { investigatorSystem } from "./prompts.js";
+import { investigatorSystem , triageReadLine, type TriageRead } from "./prompts.js";
 import { putTranscript } from "./audit.js";
 import { priceSdkResult, type NormalizedUsage } from "./pricing.js";
 import { runDecisions } from "./run-decisions.js";
@@ -67,8 +67,12 @@ export interface InvestigateOptions {
   toolOptions?: Partial<FinToolOptions>;
   /** Override config.maxTurns for this run. */
   maxTurns?: number;
+  /** Triage's whole verdict for the user message (V2_TRIAGE_HANDOFF); absent = hypotheses only, as before. */
+  triage?: TriageRead;
   /** Override config.effort for this run (low | medium | high | xhigh | max). */
   effort?: string;
+  /** Override config.masterModel for this run (a bench variant comparing models). */
+  model?: string;
   /**
    * Bedrock guardrail for this run (guardrail.ts): undefined = V2_GUARDRAIL_ID /
    * V2_GUARDRAIL_VERSION, null = off. The bench's `guardrail` variant sets it;
@@ -135,6 +139,7 @@ export async function investigate(
   });
   const maxTurns = opts.maxTurns ?? config.maxTurns;
   const effort = opts.effort ?? config.effort;
+  const model = opts.model ?? config.masterModel;
   const transcript: unknown[] = [];
   const degraded = search === null;
   let costUsd = 0;
@@ -164,6 +169,7 @@ export async function investigate(
       1,
     ),
     "",
+    ...(opts.triage ? [triageReadLine(opts.triage)] : []),
     `Triage hypotheses (starting points, not conclusions): ${JSON.stringify(hypotheses)}`,
     ...(bookContext
       ? ["", "## Your current book and standing theses", bookContext]
@@ -174,9 +180,9 @@ export async function investigate(
     for await (const message of query({
       prompt,
       options: {
-        model: config.masterModel,
+        model,
         systemPrompt:
-          opts.systemPrompt ?? investigatorSystem({ dryRun: config.dryRun, worldModel: config.worldModel }),
+          opts.systemPrompt ?? investigatorSystem({ dryRun: config.dryRun, worldModel: config.worldModel, universe: config.universe, futuresMaxPct: config.futuresMaxPct, fastDesk: config.fastDesk }),
         maxTurns,
         maxBudgetUsd: config.maxBudgetPerRunUsd,
         ...(effort ? { effort: effort as NonNullable<typeof config.effort> } : {}),
@@ -203,7 +209,7 @@ export async function investigate(
       if (m.type === "result") {
         // The SDK prices what it knows; a Bedrock id it does not know reports
         // $0, so the tokens are priced at config.masterModel's rates (pricing.ts).
-        const priced = priceSdkResult(m, config.masterModel);
+        const priced = priceSdkResult(m, model);
         costUsd = priced.usd;
         usage = priced.usage;
         pricedWithFallback = priced.pricedWithFallback;

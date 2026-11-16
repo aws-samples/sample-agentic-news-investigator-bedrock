@@ -193,6 +193,22 @@ the model (the failure mode is silent: zero-confidence holds at $0.00). Run one 
 `--max 3` before letting the live arm loose on it. Non-Anthropic models are on the roadmap
 (a Converse adapter), not supported today.
 
+## 10a. Prediction desk, fast desk and live trading
+
+An agent arm becomes a prediction desk with `V2_UNIVERSE=prediction` and a fast desk with
+`V2_FAST_DESK=1` as well; both are paper trading and off by default
+([PREDICTION_DESK.md](PREDICTION_DESK.md) has the env block and every knob). Operationally a
+desk is one more worker: same kill switch, budget, letter and dashboard. It adds an hourly
+index of open Kalshi events cached under `~/.cache/fin/` on the worker host (`V2_KALSHI_CACHE`)
+and, when `V2_SWEEP_INTERVAL_MIN` is set, a sweep investigation on that timer, which spends
+from the same daily budget.
+
+Every worker writes a `STATE` / `HEARTBEAT` row to its own table at most once a minute (host,
+pid, phase), so liveness can be read from the table on any host.
+
+Real-money trading on Kalshi is a separate, opt-in path with its own kill switch, limits and
+runbook: [LIVE_TRADING.md](LIVE_TRADING.md). Nothing in `ops/` enables it.
+
 ## 11. Opt-in data sources
 
 Seven sources ship **off** ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) quotes the terms

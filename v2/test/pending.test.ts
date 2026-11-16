@@ -9,6 +9,7 @@ import {
   positionAfterFill,
   sliceDue,
   remainderAfter,
+  pendingOrderId,
   type PendingOrder,
 } from "../src/pending.js";
 import { config } from "../src/config.js";
@@ -127,5 +128,20 @@ describe("working exits (liquidity-capped remainders)", () => {
     expect(RETRY_WHILE_REDUCING.has("position_closed")).toBe(false);
     expect(RETRY_WHILE_REDUCING.has("insufficient_cash")).toBe(false);
     expect(PARKABLE_REASONS.has("dropped_illiquid")).toBe(false);
+  });
+
+  it("every slice fills under its own ORDER# id; a replay of the same slice keeps its id", () => {
+    // 2026-10-22, v6 RBNZ: the remainder reused the first fill's action_id, the
+    // ledger's attribute_not_exists put rejected each later slice, 40 retries, expired.
+    const first = { ...exit, action_id: "a1" };
+    const rest = remainderAfter(first, 11.2, 37095, now)!;
+    const rest2 = remainderAfter(rest, 10.5, 37020, now + sliceMs)!;
+    const ids = [first.action_id, pendingOrderId(rest), pendingOrderId(rest2)];
+    expect(new Set(ids).size).toBe(3);
+    expect(pendingOrderId(rest)).toBe("a1#f1120");
+    expect(pendingOrderId({ ...rest })).toBe(pendingOrderId(rest));
+    // A plain parked order never filled, so it keeps the decision's id (and falls back to news_id).
+    expect(pendingOrderId({ ...order, action_id: "a2" })).toBe("a2");
+    expect(pendingOrderId(order)).toBe("n1");
   });
 });

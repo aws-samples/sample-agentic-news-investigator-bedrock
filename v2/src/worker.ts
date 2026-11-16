@@ -8,6 +8,8 @@ import { config, requireConfig } from "./config.js";
 import { triage } from "./triage.js";
 import { resolve } from "./quotes/resolver.js";
 import { investigateAndAct } from "./pipeline.js";
+import { noteForSweep, sweepPass } from "./sweep.js";
+import { heartbeat } from "./heartbeat.js";
 import { putAudit, claimNews } from "./audit.js";
 import { killSwitchOn, checkBudget, dayKey, meterTriage } from "./budget.js";
 import { admitForYield, categoryOf } from "./yield-data.js";
@@ -16,11 +18,17 @@ import { rollDay, listPositions } from "./ledger.js";
 import { WebSearch } from "./websearch.js";
 import { scorePass } from "./score.js";
 import { watchPass } from "./watch.js";
+import { reconcilePass } from "./live/route.js";
 import { recentActivity as recent } from "./recent.js";
 import { ensureBootstrap, triageExposures } from "./world.js";
 import { curiosityPass } from "./curiosity.js";
 import { snapshotSymbols, recordEventSnapshot } from "./tape.js";
 import { enrichForTriage } from "./enrich.js";
+import { contractsFor } from "./triage-contracts.js";
+import { StormCycleBuffer } from "./storm-cycle.js";
+import { triageBook } from "./triage-book.js";
+import { getTheses } from "./thesis.js";
+import { searchKalshi } from "./quotes/kalshi-search.js";
 import type { NewsItem } from "./types.js";
 
 const sqs = new SQSClient({ region: config.region });
@@ -30,11 +38,16 @@ const sqs = new SQSClient({ region: config.region });
 let heldCache: { symbols: unknown[]; at: number } = { symbols: [], at: 0 };
 async function heldSymbols(): Promise<unknown[]> {
   if (Date.now() - heldCache.at > 5 * 60_000) {
-    const symbols = (await listPositions()).map((p) => p.symbol);
-    heldCache = {
-      symbols: config.worldModel ? await triageExposures(symbols).catch(() => symbols) : symbols,
-      at: Date.now(),
-    };
+    const positions = await listPositions();
+    const symbols = positions.map((p) => p.symbol);
+    let held: unknown[] = symbols;
+    if (config.worldModel) held = await triageExposures(symbols).catch(() => symbols);
+    else if (config.triageBook) {
+      const book = triageBook(positions, () => undefined);
+      const theses = new Map((await getTheses(book.map((b) => b.symbol)).catch(() => [])).map((t) => [t.symbol, t.latest.rationale]));
+      held = triageBook(positions, (s) => theses.get(s));
+    }
+    heldCache = { symbols: held, at: Date.now() };
   }
   return heldCache.symbols;
 }
@@ -53,13 +66,29 @@ function markExplored(category: string): void {
   explored.set(category, e && e.day === day ? { day, n: e.n + 1 } : { day, n: 1 });
 }
 
+const stormCycles = new StormCycleBuffer(config.stormHoldSecs * 1000);
+
 async function handleNews(raw: NewsItem, web: WebSearch | null): Promise<void> {
   const ageHours = (Date.now() - Date.parse(raw.published_at)) / 3.6e6;
   if (Number.isFinite(ageHours) && ageHours > config.maxNewsAgeHours) {
     return; // stale backlog (worker was offline); investigating it is wasted spend
   }
   if (!(await claimNews(raw.id))) return; // duplicate delivery
+  // A storm product waits for the rest of its advisory cycle; the best one is triaged (flushStormCycles).
+  if (stormCycles.offer(raw, Date.now()) === "held") return;
+  await triageAndAct(raw, web);
+}
 
+/** Storm cycles whose hold window closed: triage the chosen product, record the others as passed over. */
+async function flushStormCycles(web: WebSearch | null): Promise<void> {
+  for (const { best, passedOver } of stormCycles.due(Date.now())) {
+    for (const p of passedOver)
+      await putAudit(p.id, "v2-dedupe", { headline: p.headline, reason: `storm cycle: triaged "${best.headline}" instead` });
+    await triageAndAct(best, web);
+  }
+}
+
+async function triageAndAct(raw: NewsItem, web: WebSearch | null): Promise<void> {
   // Identical headline within the dedupe window: not worth even a triage call.
   if (recent.isDuplicate(raw)) {
     await putAudit(raw.id, "v2-dedupe", { headline: raw.headline });
@@ -71,11 +100,14 @@ async function handleNews(raw: NewsItem, web: WebSearch | null): Promise<void> {
   const item = await enrichForTriage(raw);
 
   const held = await heldSymbols();
-  const verdict = await triage(item, held, recent.recent()).catch((e) => {
+  const openContracts =
+    config.triageContracts && config.universe === "prediction" ? await contractsFor(item) : undefined;
+  const verdict = await triage(item, held, recent.recent(), undefined, openContracts).catch((e) => {
     console.error(`[worker] triage failed for ${item.id}:`, e);
     return null;
   });
   if (!verdict) return;
+  if (config.sweepIntervalMin > 0) noteForSweep(item, verdict);
 
   // Admission. Flat bars by default (held news clears a lower one — the agent
   // may need to exit); with V2_YIELD_TRIAGE=on the bar for other news moves per
@@ -101,6 +133,7 @@ async function handleNews(raw: NewsItem, web: WebSearch | null): Promise<void> {
             : {}),
         }
       : {}),
+    ...(openContracts ? { open_contracts: openContracts.map((c) => c.symbol) } : {}),
     ...(config.yieldTriage.enabled
       ? { yield: { ...admission, table_at: yieldTable?.computedAtIso ?? null } }
       : {}),
@@ -142,7 +175,7 @@ async function handleNews(raw: NewsItem, web: WebSearch | null): Promise<void> {
       `${verdict.touches_positions ? ", touches book" : ""}): ${item.headline}`,
   );
   await snapshot;
-  await investigateAndAct(item, verdict.hypotheses, web);
+  await investigateAndAct(item, verdict.hypotheses, web, config.triageHandoff ? { triage: verdict } : {});
   heldCache.at = 0; // decision may have changed the book
 }
 
@@ -160,19 +193,26 @@ async function main(): Promise<void> {
   requireConfig(["queueUrl"]);
   console.log(
     `[worker] fin ${config.arm} starting — table=${config.table} dryRun=${config.dryRun} ` +
-      `model=${config.masterModel} maxTurns=${config.maxTurns} effort=${config.effort ?? "default(high)"} worldModel=${config.worldModel}`,
+      `model=${config.masterModel} maxTurns=${config.maxTurns} effort=${config.effort} worldModel=${config.worldModel}` +
+      (config.universe !== "all" ? ` universe=${config.universe} futuresMax=${config.futuresMaxPct} sweepEveryMin=${config.sweepIntervalMin}` : "") +
+      (config.triageContracts ? " triageContracts=on" : ""),
   );
   if (config.worldModel) {
     await ensureBootstrap().catch((e) => console.error("[worker] world-model bootstrap failed:", e));
   }
   const web = await WebSearch.start();
   if (!web) console.warn("[worker] no web search — investigations run degraded");
+  // The Kalshi index takes ~17 s to build, past triage's 8 s lookup budget: warm it at boot.
+  if (config.triageContracts && config.universe === "prediction") void searchKalshi("warm", 1).catch(() => {});
   let lastScorePass = 0;
   let lastWatchPass = 0;
+  let lastReconcilePass = 0;
   let lastCuriosityPass = Date.now(); // first pass after one interval, not at boot
+  let lastSweepPass = Date.now() - Math.max(0, config.sweepIntervalMin - 15) * 60_000; // first sweep ~15 min after boot
   for (;;) {
     try {
       await rollDay(dayKey());
+      await heartbeat("loop");
       if (Date.now() - lastScorePass > 15 * 60_000) {
         lastScorePass = Date.now();
         const s = await scorePass(resolve);
@@ -183,6 +223,12 @@ async function main(): Promise<void> {
         }
       }
       // Event-driven selling: price moves + settlement + the daily review.
+      // Live arm only: compare the ledger's Kalshi positions with the exchange's. Audited, never
+      // auto-corrected — a drift means something filled or settled that the ledger did not see.
+      if (config.live !== "off" && Date.now() - lastReconcilePass > 15 * 60_000) {
+        lastReconcilePass = Date.now();
+        await reconcilePass().catch((e) => console.error("[worker] reconcile failed:", String(e).slice(0, 200)));
+      }
       if (Date.now() - lastWatchPass > 5 * 60_000) {
         lastWatchPass = Date.now();
         if (!(await killSwitchOn())) {
@@ -197,6 +243,17 @@ async function main(): Promise<void> {
           await curiosityPass(web).catch((e) => console.error("[worker] curiosity pass failed:", e));
           heldCache.at = 0;
         }
+      }
+      // v5: the market-first sweep (sweep.ts).
+      if (config.sweepIntervalMin > 0 && Date.now() - lastSweepPass > config.sweepIntervalMin * 60_000) {
+        lastSweepPass = Date.now();
+        if (!(await killSwitchOn())) {
+          await sweepPass(web).catch((e) => console.error("[worker] sweep pass failed:", e));
+          heldCache.at = 0;
+        }
+      }
+      if (config.stormHoldSecs > 0 && !(await killSwitchOn())) {
+        await flushStormCycles(web).catch((e) => console.error("[worker] storm-cycle flush failed:", e));
       }
       const r = await sqs.send(
         new ReceiveMessageCommand({

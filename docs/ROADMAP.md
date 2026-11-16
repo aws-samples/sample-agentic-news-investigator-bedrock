@@ -55,7 +55,16 @@ the universe offline at once. A pluggable `QuoteSource` for an official or licen
 and quotes feed — even one that covers US equities only — would remove the single point of
 fragility from the resolver and from bench scoring.
 
-## 7. Smaller items
+## 7. The live path beyond one venue
+
+The opt-in live path ([LIVE_TRADING.md](LIVE_TRADING.md)) places orders on Kalshi only and
+keeps one cash figure. Not built: a second venue, a cash balance per venue with orders checked
+against the venue they route to, working an order that does not fill at once, a secrets-manager
+integration for the exchange key, alerting on reconcile differences, and tax records. The
+sizing multiplier is a blunt control; a per-theme exposure limit in real dollars would bound
+correlated contracts better than the per-contract cap does.
+
+## 8. Smaller items
 
 - **Per-arm daily letters.** The letter reads one arm's table and reports directory; a
   world-model arm gets no letter of its own today.

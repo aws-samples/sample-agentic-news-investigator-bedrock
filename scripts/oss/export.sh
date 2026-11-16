@@ -89,7 +89,11 @@ if [ -f "$ROOT/scripts/oss/private-scrub.pattern" ] && [ -z "${SCRUB_EXTRA_PATTE
   SCRUB_EXTRA_PATTERN="$(grep -v '^#' "$ROOT/scripts/oss/private-scrub.pattern" | tr -d '\n')"
   export SCRUB_EXTRA_PATTERN
 fi
-remove scripts/oss/private-paths scripts/oss/private-scrub.pattern
+if [ -f "$ROOT/scripts/oss/private-scrub-cs.pattern" ] && [ -z "${SCRUB_EXTRA_PATTERN_CS:-}" ]; then
+  SCRUB_EXTRA_PATTERN_CS="$(grep -v '^#' "$ROOT/scripts/oss/private-scrub-cs.pattern" | tr -d '\n')"
+  export SCRUB_EXTRA_PATTERN_CS
+fi
+remove scripts/oss/private-paths scripts/oss/private-scrub.pattern scripts/oss/private-scrub-cs.pattern
 find "$TARGET" -name '.DS_Store' -type f -delete
 
 # The post-mortem stays, filed where a reader expects it.

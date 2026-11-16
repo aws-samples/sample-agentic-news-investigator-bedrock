@@ -100,6 +100,12 @@ export interface TradeDecision {
    * closed or the limit isn't met, the order parks and is retried until expiry.
    */
   limit_price?: number;
+  /** v6: the agent's own probability that the side bought wins (sizing by edge; Brier vs the price paid). */
+  fair_probability?: number;
+  /** v6: exit plan — take profit at this price, cut at this price, re-decide by this time (ISO). */
+  exit_target?: number;
+  exit_stop?: number;
+  exit_by?: string;
   /**
    * Internal, never set by the agent: the order may only shrink an existing
    * position (a sell caps at the long held, a buy at the short outstanding) and
